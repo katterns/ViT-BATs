@@ -1,0 +1,7 @@
+/.venv
+/checkpoints
+/cleaned*
+/third_party
+*.pptx
+__pycache__
+presentation.pdf
