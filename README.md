@@ -61,14 +61,14 @@ python scripts/download_audiomae_pretrained.py # checkpoints/audiomae_pretrained
 
 | Контур | Модель | macro-F1 | bal. acc. | Чекпоинт |
 |--------|--------|----------|-----------|----------|
+| A0 | CNN A0 + log-STFT | 0.788 | 0.790 | `checkpoints/cnn_bat_a0_best.pt` |
+| B0 | AudioMAE | 0.340 | 0.360 | `checkpoints/audiomae_bat_finetune_best.pt` |
 | B1 | ResNet18 + log-STFT | **0.818** | 0.818 | `checkpoints/resnet18_bat_best.pt` |
 | B2 | BEATs + uniform FB | **0.803** | 0.806 | `checkpoints/beats_bat_finetune_best.pt` |
-| A0 | CNN A0 + log-STFT | 0.788 | 0.790 | `checkpoints/cnn_bat_a0_best.pt` |
-| B0 | AudioMAE | 0.181 | 0.230 | `checkpoints/audiomae_bat_finetune_best.pt` |
 
 Лучший результат — ResNet18 (B1), macro-F1 0.818 (эпоха 40). BEATs (B2) — 0.803 (эпоха 37), CNN A0 — 0.788 (эпоха 40).
 
-Результат AudioMAE (B0) получен после 4 эпох и не является сопоставимым с завершёнными прогонами A0, B1 и B2; требуется дообучение до заданного бюджета эпох и перенос на общий протокол.
+AudioMAE (B0) — 0.340 (эпоха 28, early stopping на 38); уступает A0, B1 и B2. Лог метрик: `checkpoints/audiomae_bat_train_log.txt`.
 
 На поздних эпохах BEATs наблюдается рост разрыва между train и validation loss. Для оценки и inference используется чекпоинт с максимальным macro-F1, а не последняя эпоха. Лог метрик: `checkpoints/beats_bat_train_log.txt`.
 
