@@ -74,10 +74,8 @@ AudioMAE (B0) — 0.340 (эпоха 28, early stopping на 38); уступае�
 
 ## Дальнейшие шаги
 
-1. Завершить дообучение AudioMAE (B0) до 40 эпох и перенести на общий протокол (2 с, 192 kHz).
-2. Дообучить BEATs (B2) с resume и абляциями LR.
-3. Реализовать и оценить контур C (masked AE, сравнение LF-PE и sin-cos).
-4. Провести абляции частотной предобработки: PCEN, полосовая фильтрация.
+1. **B2 (BEATs):** resume с абляциями LR и регуляризации; смягчить переобучение (рост разрыва train/val loss на поздних эпохах).
+2. **C:** pretrain masked autoencoder на log-STFT и сравнение LF-PE vs sin-cos на downstream-классификации (`frequency_aware_ssl_bat_pipeline.ipynb`).
 
 Разведочный анализ данных: `EDA_local.ipynb`.
 
