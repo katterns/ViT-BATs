@@ -13,7 +13,7 @@
 - Летучие мыши выполняют важные экологические функции: контроль численности насекомых, опыление, распространение семян. В NABat ML отдельно подчёркивается, что многие популяции подвержены исчезнавению из-за синдрома белого носа, ветряных турбин, изменения климата и потери местообитаний, а базовой информации о распространении и динамике видов всё ещё не хватает ([Khalighifar et al., 2022](https://doi.org/10.1111/1365-2664.14280)).
 - Акустический мониторинг масштабируется лучше ручных наблюдений: датчики можно ставить на большие территории и собирать большие объёмы данных. Но затем появляется узкое место - часы записей нужно разметить и проверить. В NABat ML данные вручную размечали эксперты и волонтёры; именно поэтому авторы развивали автоматизированную, воспроизводимую CNN-систему для обработки акустических данных NABat ([Khalighifar et al., 2022](https://doi.org/10.1111/1365-2664.14280)).
 - Современные системы должны быть не только точными, но и доступными. В BSG-BATS отмечается, что многие инструменты для определения видов закрытые, регионально ограниченные или плохо масштабируются; это мешает совместной разметке и интеграции данных из разных проектов ([Meramo et al., 2025](https://doi.org/10.1111/2041-210x.70220)).
-- Сигналы летучих мышей сложны для классификации: высокая внутривидовая вариативность, похожие виды, наложение сигналов, шум и недостаток размеченных данных. Эти причины прямо выделяются в работе ([Fundel et al., 2023](https://arxiv.org/abs/2309.11218)).
+- Сигналы летучих мышей сложны для классификации: высокая внутривидовая вариативность, похожие виды, наложение сигналов, шум и недостаток размеченных данных ([Fundel et al., 2023](https://arxiv.org/abs/2309.11218)).
 - В биоакустике часто мало размеченных данных, поэтому self-supervised learning и transfer learning рассматриваются как способы использовать неразмеченные записи и уменьшить стоимость разметки. В работах по SSL для биоакустики подчёркивается, что данные шумные и часто ограничены по объёму, а их разметка экспертами стоит очень дорого ([Sarkar & Magimai-Doss, 2025](https://arxiv.org/abs/2501.05987), [Liang et al., 2024](https://arxiv.org/abs/2409.09647)).
 
 Отдельная часть проекта связана с позиционным кодированием в Transformer. У механизма внимания нет встроенного знания о порядке и координатах токенов, поэтому для спектрограмм важно явно задавать положение патча по времени и частоте. В статье *Learnable Fourier Features for Multi-Dimensional Spatial Positional Encoding* предложено обучаемое фурье-кодирование для многомерных координат: вместо фиксированного позиционного вектора координаты проходят через обучаемое фурье-преобразование и небольшой MLP. Авторы показывают, что такой подход лучше передаёт пространственные отношения между токенами, повышает качество и ускоряет сходимость по сравнению с рядом других способов позиционного кодирования ([Li et al., 2021](https://arxiv.org/abs/2106.02795)). В этом проекте эта идея проверялась на частотно-временной сетке log-STFT спектрограмм.
@@ -32,13 +32,13 @@
 
 Для train используется `WeightedRandomSampler`, чтобы классы с меньшим числом записей не терялись в батчах. На validation всегда используется центральный crop без аугментаций.
 
-Аугментации применялись только на train. Для моделей на log-STFT использовались случайный gain jitter исходного waveform и SpecAugment: маски по частоте и времени уже на спектрограмме. Для BEATs аугментация была мягче: использовался тот же 2-секундный crop и небольшой jitter громкости waveform, без SpecAugment на filter bank. Это важное ограничение сравнения: более мягкая аугментация могла помочь BEATs сохранить признаки предобученного encoder-а, но сама по себе не объясняет весь разрыв, потому что одновременно отличаются frontend, предобучение и архитектура. Отдельно проверялся MixUp на этапе fine-tune ViT: он смешивал пары спектрограмм и soft-labels и оказался самой полезной регуляризацией для собственного Transformer-пайплайна.
+Аугментации применялись только на train. Для моделей на log-STFT использовались случайный gain jitter исходного waveform и SpecAugment: маски по частоте и времени уже на спектрограмме. Для BEATs аугментация была мягче: использовался тот же 2-секундный crop и небольшое изменение громкости, без SpecAugment на filter bank. Это важное ограничение сравнения: исключение маскировани при аугментации могло помочь BEATs сохранить признаки предобученного encoder-а, но сама по себе не объясняет весь разрыв, потому что одновременно отличаются frontend, предобучение и архитектура. Отдельно проверялся MixUp на этапе fine-tune ViT: он смешивал пары спектрограмм и soft-labels и оказался самой полезной регуляризацией для собственного Transformer-пайплайна.
 
 ## График экспериментов
 
 ### 1. Предобработка аудио
 
-Предобработка для log-STFT моделей была взята как практическая адаптация подхода NABat ML. В NABat ML авторы детектируют импульсы в WAV-записях, считают FFT/STFT, фильтруют диапазон 5-100 kHz, превращают фрагменты в спектрограммы и подают изображения в CNN ([Khalighifar et al., 2022](https://doi.org/10.1111/1365-2664.14280)). У нас задача проще по интерфейсу: записи уже нарезаны как отдельные WAV-файлы, поэтому вместо детекции отдельных 50-ms импульсов берётся 2-секундный фрагмент записи.
+Предобработка для log-STFT моделей была взята как практическая адаптация подхода NABat ML. В NABat ML авторы детектируют импульсы в WAV-записях, считают FFT/STFT, фильтруют диапазон 5-100 kHz, превращают фрагменты в спектрограммы и подают изображения в CNN ([Khalighifar et al., 2022](https://doi.org/10.1111/1365-2664.14280)). В текущей работе записи уже нарезаны как отдельные WAV-файлы, поэтому вместо детекции отдельных 50-ms импульсов берётся 2-секундный фрагмент записи.
 
 Адаптированный pipeline:
 
@@ -68,7 +68,7 @@ flowchart LR
 
 ### 2. Supervised baseline: CNN
 
-Первым baseline была компактная CNN на log-STFT. Это близко к классическому подходу в bat call classification: спектрограмма рассматривается как изображение, а свёртки ловят локальные частотно-временные паттерны.
+Первым baseline была компактная CNN на log-STFT. Это близко к классическому подходу: спектрограмма рассматривается как изображение, а свёртки ловят локальные частотно-временные паттерны.
 
 Ноутбук: `supervised_cnn_baseline.ipynb`.
 
@@ -87,7 +87,7 @@ flowchart LR
 
 ### 3. Supervised baseline: ResNet18
 
-ResNet18 использует тот же log-STFT frontend, но даёт более сильный image-like baseline. В отличие от BEATs и AudioMAE, модель не получает внешнее аудио-предобучение: она учится на целевых спектрограммах с нуля.
+ResNet18 использует тот же log-STFT frontend, но даёт более сильный image-like baseline. В отличие от BEATs, модель не получает внешнее аудио-предобучение: она учится на целевых спектрограммах с нуля.
 
 Ноутбук: `supervised_resnet_baseline.ipynb`.
 
@@ -105,26 +105,7 @@ flowchart LR
     F --> G["26 classes"]
 ```
 
-### 4. Transfer learning: AudioMAE
-
-AudioMAE проверялся как перенос готового masked-audio encoder. В этом контуре frontend отличается от log-STFT baseline: используется mel/fbank-представление, а входной домен ближе к обычному audio pretraining, чем к ультразвуковой эхолокации.
-
-Ноутбук: `audiomae_finetune_baseline.ipynb`.
-
-```mermaid
-flowchart LR
-    subgraph P["Preprocessing"]
-        A["WAV"] --> B["AudioMAE fbank frontend"]
-    end
-    subgraph M["Transfer learning"]
-        B --> C["Pretrained AudioMAE encoder"]
-        C --> D["Mean pooling"]
-        D --> E["Classification head"]
-    end
-    E --> F["26 classes"]
-```
-
-### 5. Transfer learning: BEATs
+### 4. Transfer learning: BEATs
 
 BEATs оказался сильным внешним аудио baseline. Для ультразвукового ввода использовался uniform filter bank на исходных 192 kHz: STFT, усреднение по 128 равномерным частотным полосам, затем encoder BEATs_iter3. В отличие от log-STFT моделей, временная ось не ужималась до 256 кадров.
 
@@ -145,7 +126,7 @@ flowchart LR
     G --> H["26 classes"]
 ```
 
-### 6. Абляции BEATs
+### 5. Абляции BEATs
 
 После основного BEATs baseline проверялись стратегии transfer learning:
 
@@ -155,7 +136,7 @@ flowchart LR
 
 Эти эксперименты нужны были, чтобы понять, что именно даёт качество BEATs: готовый encoder как feature extractor или полный fine-tune. Результат оказался однозначным: полный fine-tune на 2-секундном клипе лучше.
 
-### 7. Supervised positional encoding: LFPE vs sin/cos
+### 6. Supervised positional encoding: LFPE vs sin/cos
 
 Перед интерпретацией SSL-результатов была сделана проверка: два ViT с одинаковой архитектурой и без SSL pretrain, но с разным positional encoding.
 
@@ -177,7 +158,7 @@ flowchart LR
     G --> H["26 classes"]
 ```
 
-### 8. Собственный ViT: LFPE + SSL MAE
+### 7. Собственный ViT: LFPE + SSL MAE
 
 Основной исследовательский контур проекта - компактный ViT с Learnable Fourier positional encoding и self-supervised pretraining через masked autoencoding.
 
@@ -222,7 +203,7 @@ flowchart LR
     G --> H["26 classes"]
 ```
 
-### 9. Абляции ViT
+### 8. Абляции ViT
 
 После базового fine-tune проверялись:
 
@@ -241,7 +222,7 @@ flowchart LR
 
 ![Основные результаты на validation](images/main_results_macro_f1.png)
 
-Главный результат: ResNet18 остаётся лучшей моделью проекта (`macro-F1=0.818`, `checkpoints/resnet18_bat_best.pt`). BEATs почти догоняет его (`0.803`, `checkpoints/beats_bat_finetune_best.pt`), а лучший собственный Transformer-пайплайн — `ViT LFPE + SSL + MixUp` (`0.753`, `checkpoints/vit_lfpe_bat_ablation_8_mixup_reg_best.pt`). AudioMAE в текущей постановке оказался нерелевантным baseline (`0.340`).
+Главный результат: ResNet18 остаётся лучшей моделью проекта (`macro-F1=0.818`, `checkpoints/resnet18_bat_best.pt`). BEATs почти догоняет его (`0.803`, `checkpoints/beats_bat_finetune_best.pt`), а лучший собственный Transformer-пайплайн — `ViT LFPE + SSL + MixUp` (`0.753`, `checkpoints/vit_lfpe_bat_ablation_8_mixup_reg_best.pt`).
 
 На графике ниже показана динамика validation macro-F1 по эпохам. Это те же ключевые scalar-метрики, которые логировались в ClearML, сохранённые отдельно в воспроизводимом виде.
 
@@ -322,36 +303,16 @@ BEATs предобучен на широком аудио-домене и хор
 
 ## Итог
 
-Проект не привёл к модели, которая обгоняет ResNet18 или BEATs. Зато получилась содержательная экспериментальная картина:
+Проект не привёл к модели, которая обгоняет ResNet18 или BEATs, но по проделанной работе можно сделать следующие выводы:
 
 - сильный CNN/ResNet baseline остаётся лучшим для этой выборки;
 - BEATs хорошо переносится, но ограничен domain gap между обычным аудио и ультразвуком;
-- AudioMAE в этой конфигурации не подошёл;
 - собственный ViT без SSL слабый;
 - LFPE немного лучше fixed sin/cos в supervised-only контроле;
 - SSL pretraining существенно улучшает ViT;
 - MixUp даёт лучший собственный Transformer результат.
 
-Можно сделать выво, что для малой выборки ультразвуковых спектрограмм CNN-индуктивный bias оказался сильнее, чем компактный Transformer. Self-supervised pretraining делает ViT заметно лучше, но текущий MAE-pretrain и объём данных недостаточны, чтобы превзойти ResNet18.
-
-## Основные файлы
-
-| Файл | Назначение |
-| --- | --- |
-| `supervised_cnn_baseline.ipynb` | CNN baseline |
-| `supervised_resnet_baseline.ipynb` | ResNet18 baseline |
-| `audiomae_finetune_baseline.ipynb` | AudioMAE transfer learning |
-| `beats_ultrasound_bat_baseline.ipynb` | BEATs full fine-tune |
-| `beats_freeze_head_baseline.ipynb` | BEATs frozen backbone |
-| `beats_partial_layers_baseline.ipynb` | BEATs partial fine-tune |
-| `beats_clip1s_baseline.ipynb` | BEATs with 1 s clips |
-| `vit_lfpe_ssl_pretrain.ipynb` | MAE pretraining for ViT LFPE |
-| `vit_lfpe_bat_baseline.ipynb` | ViT LFPE + SSL fine-tune |
-| `vit_sincos_bat_supervised_baseline.ipynb` | supervised-only sin/cos PE control |
-| `vit_lfpe_bat_supervised_baseline.ipynb` | supervised-only LFPE control |
-| `vit_lfpe_bat_ablation_mixup_reg.ipynb` | best ViT: SSL + MixUp |
-| `vit_lfpe_bat_ablation_resnet_distill.ipynb` | ResNet distillation |
-| `vit_lfpe_bat_ablation_cnn_hybrid.ipynb` | CNN + ViT hybrid |
+В результате, для малой выборки ультразвуковых спектрограмм CNN-индуктивный bias оказался сильнее, чем компактный Transformer. Self-supervised pretraining делает ViT заметно лучше, но текущий MAE-pretrain и объём данных недостаточны, чтобы превзойти ResNet18.
 
 ## Ссылки
 
@@ -360,6 +321,5 @@ BEATs предобучен на широком аудио-домене и хор
 - Fundel et al., [Automatic Bat Call Classification using Transformer Networks](https://arxiv.org/abs/2309.11218)
 - Li et al., [Learnable Fourier Features for Multi-Dimensional Spatial Positional Encoding](https://arxiv.org/abs/2106.02795)
 - Chen et al., [BEATs: Audio Pre-Training with Acoustic Tokenizers](https://arxiv.org/abs/2212.09058)
-- Huang et al., [Masked Autoencoders that Listen](https://arxiv.org/abs/2203.16609)
 - Sarkar & Magimai-Doss, [Comparing SSL Models Pre-Trained on Human Speech and Animal Vocalizations for Bioacoustics Processing](https://arxiv.org/abs/2501.05987)
 - Mahbub et al., [Bat2Web: real-time classification of bat species echolocation signals](https://doi.org/10.3390/s24092899)
