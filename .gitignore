@@ -5,4 +5,8 @@
 *.pptx
 __pycache__
 presentation.pdf
+презентация.pdf
+Презентация1.pdf
 .env
+*.csv
+.DS_Store

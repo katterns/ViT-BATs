@@ -32,21 +32,27 @@
 
 Для train используется `WeightedRandomSampler`, чтобы классы с меньшим числом записей не терялись в батчах. На validation всегда используется центральный crop без аугментаций.
 
-Аугментации применялись только на train. Для моделей на log-STFT использовались случайный gain jitter исходного waveform и SpecAugment: маски по частоте и времени уже на спектрограмме. Для BEATs аугментация была мягче: использовался тот же 2-секундный crop и небольшое изменение громкости, без SpecAugment на filter bank. Это важное ограничение сравнения: исключение маскировани при аугментации могло помочь BEATs сохранить признаки предобученного encoder-а, но сама по себе не объясняет весь разрыв, потому что одновременно отличаются frontend, предобучение и архитектура. Отдельно проверялся MixUp на этапе fine-tune ViT: он смешивал пары спектрограмм и soft-labels и оказался самой полезной регуляризацией для собственного Transformer-пайплайна.
+Для log-STFT моделей (ViT, CNN, ResNet) train/validation split делается по **файлам**, после чего каждый WAV разбивается на примеры по отдельным импульсам (`expand_by_pulses`). Для BEATs split остаётся **по файлам** без pulse expansion: модель сама берёт 2-секундный crop из записи.
+
+SSL pretrain обучается на полном каталоге `cleaned` без меток классов; supervised fine-tune и baselines — на `cleaned_subset_200`.
+
+Аугментации применялись только на train. Для моделей на log-STFT использовались случайный gain jitter исходного waveform и SpecAugment: маски по частоте и времени уже на спектрограмме. Для BEATs аугментация была мягче: использовался 2-секундный crop и небольшое изменение громкости, без SpecAugment на filter bank. Это важное ограничение сравнения: исключение маскирования при аугментации могло помочь BEATs сохранить признаки предобученного encoder-а, но сама по себе не объясняет весь разрыв, потому что одновременно отличаются frontend, предобучение и архитектура. Отдельно проверялся MixUp на этапе fine-tune ViT: он смешивал пары спектрограмм и soft-labels и оказался самой полезной регуляризацией для собственного Transformer-пайплайна.
+
+Запуск текущих скриптов: `uv sync`, затем `uv run python <script>.py`. Настраиваемые параметры — в `config.py`; чекпоинты — в `checkpoints/`, логи Lightning — в `checkpoints/lightning_logs/<run_name>/`.
 
 ## График экспериментов
 
 ### 1. Предобработка аудио
 
-Предобработка для log-STFT моделей была взята как практическая адаптация подхода NABat ML. В NABat ML авторы детектируют импульсы в WAV-записях, считают FFT/STFT, фильтруют диапазон 5-100 kHz, превращают фрагменты в спектрограммы и подают изображения в CNN ([Khalighifar et al., 2022](https://doi.org/10.1111/1365-2664.14280)). В текущей работе записи уже нарезаны как отдельные WAV-файлы, поэтому вместо детекции отдельных 50-ms импульсов берётся 2-секундный фрагмент записи.
+Предобработка для log-STFT моделей была взята как практическая адаптация подхода NABat ML. В NABat ML авторы детектируют импульсы в WAV-записях, считают FFT/STFT, фильтруют диапазон 5-100 kHz, превращают фрагменты в спектрограммы и подают изображения в CNN ([Khalighifar et al., 2022](https://doi.org/10.1111/1365-2664.14280)). В текущем коде для ViT, CNN и ResNet из каждой записи детектируются импульсы, и вокруг центра импульса берётся **50-ms** фрагмент (реализация: `bat/data/audio.py`).
 
-Адаптированный pipeline:
+Pipeline для log-STFT моделей:
 
 1. WAV приводится к mono.
 2. Частота дискретизации приводится к 192 kHz.
-3. Из записи берётся 2-секундный фрагмент.
-   - train: random crop или energy-biased crop с вероятностью 0.7;
-   - validation: center crop.
+3. Детектируются импульсы; вокруг центра берётся **50-ms** crop.
+   - train: случайный импульс из записи;
+   - validation: центральный импульс.
 4. Считается STFT: `n_fft=2048`, `hop_length=512`.
 5. Оставляется ультразвуковая полоса 5-96 kHz.
 6. Берётся `log1p(abs(STFT))`.
@@ -54,23 +60,26 @@
 8. Нормализация по каждому примеру.
 9. Для train: SpecAugment по частоте/времени и jitter громкости; для validation эти шаги отключены.
 
+Для BEATs используется отдельный frontend: **2-секундный** waveform crop → uniform 128-bin filter bank (см. раздел 4).
+
 ```mermaid
 flowchart LR
     A["Raw WAV"] --> B["Mono, 192 kHz"]
-    B --> C["2 s crop"]
-    C --> D["STFT"]
-    D --> E["Band-pass 5-96 kHz"]
-    E --> F["log1p magnitude"]
-    F --> G["Resize 128 x 256"]
-    G --> H["Per-example normalization"]
-    H --> I["Model input"]
+    B --> C["Pulse detection"]
+    C --> D["50 ms crop"]
+    D --> E["STFT"]
+    E --> F["Band-pass 5-96 kHz"]
+    F --> G["log1p magnitude"]
+    G --> H["Resize 128 x 256"]
+    H --> I["Per-example normalization"]
+    I --> J["Model input"]
 ```
 
 ### 2. Supervised baseline: CNN
 
 Первым baseline была компактная CNN на log-STFT. Это близко к классическому подходу: спектрограмма рассматривается как изображение, а свёртки ловят локальные частотно-временные паттерны.
 
-Ноутбук: `supervised_cnn_baseline.ipynb`.
+Скрипт: `supervised_cnn_baseline.py`.
 
 ```mermaid
 flowchart LR
@@ -89,7 +98,7 @@ flowchart LR
 
 ResNet18 использует тот же log-STFT frontend, но даёт более сильный image-like baseline. В отличие от BEATs, модель не получает внешнее аудио-предобучение: она учится на целевых спектрограммах с нуля.
 
-Ноутбук: `supervised_resnet_baseline.ipynb`.
+Скрипт: `supervised_resnet_baseline.py`.
 
 ```mermaid
 flowchart LR
@@ -109,7 +118,7 @@ flowchart LR
 
 BEATs оказался сильным внешним аудио baseline. Для ультразвукового ввода использовался uniform filter bank на исходных 192 kHz: STFT, усреднение по 128 равномерным частотным полосам, затем encoder BEATs_iter3. В отличие от log-STFT моделей, временная ось не ужималась до 256 кадров.
 
-Ноутбук: `beats_ultrasound_bat_baseline.ipynb`.
+Скрипт: `beats_ultrasound_baseline.py`. Предобученные веса: `python scripts/download_beats_pretrained.py` → `checkpoints/BEATs_iter3.pt`.
 
 ```mermaid
 flowchart LR
@@ -140,8 +149,8 @@ flowchart LR
 
 Перед интерпретацией SSL-результатов была сделана проверка: два ViT с одинаковой архитектурой и без SSL pretrain, но с разным positional encoding.
 
-- `vit_sincos_bat_supervised_baseline.ipynb`: fixed 2D sin/cos PE;
-- `vit_lfpe_bat_supervised_baseline.ipynb`: learnable Fourier positional encoding.
+- fixed 2D sin/cos PE (исторический ноутбук);
+- learnable Fourier positional encoding (`vit_lfpe_bat_baseline.py` с `--no-ssl`).
 
 Это сравнение не отвечает на вопрос про SSL, но показывает, что LFPE не хуже фиксированной sin/cos позиции в supervised-only режиме.
 
@@ -162,14 +171,15 @@ flowchart LR
 
 Основной исследовательский контур проекта - компактный ViT с Learnable Fourier positional encoding и self-supervised pretraining через masked autoencoding.
 
-Pretrain:
+Pretrain (`vit_lfpe_ssl_pretrain.py`):
 
 - вход: log-STFT 128x256;
 - patch size: 16x16;
-- encoder: 8 transformer-блоков, hidden dim 256;
+- encoder: 8 transformer-блоков, hidden dim 384;
 - decoder: 4 transformer-блока;
 - masking: signal-aware, маскируются только high-energy patches; нижние 25% патчей по энергии считаются фоном/шумом и не входят в reconstruction loss;
-- loss: MSE по замаскированным патчам.
+- loss: MSE по замаскированным патчам;
+- optional contrastive loss между overlapping left/right views (`SEM_CONTRASTIVE_WEIGHT` в `config.py`).
 
 ```mermaid
 flowchart LR
@@ -186,7 +196,7 @@ flowchart LR
     G --> H["MSE reconstruction loss"]
 ```
 
-Fine-tune:
+Fine-tune (`vit_lfpe_bat_baseline.py`):
 
 ```mermaid
 flowchart LR
@@ -214,7 +224,7 @@ flowchart LR
 - distillation + MixUp;
 - mean vs mean+max pooling;
 
-Лучший вариант собственного Transformer-пайплайна: `vit_lfpe_bat_ablation_mixup_reg.ipynb`, macro-F1 0.753.
+Лучший вариант собственного Transformer-пайплайна: MixUp ablation, macro-F1 0.753 (`checkpoints/vit_lfpe_bat_ablation_8_mixup_reg_best.pt`).
 
 ## Результаты
 
@@ -224,7 +234,7 @@ flowchart LR
 
 Главный результат: ResNet18 остаётся лучшей моделью проекта (`macro-F1=0.818`, `checkpoints/resnet18_bat_best.pt`). BEATs почти догоняет его (`0.803`, `checkpoints/beats_bat_finetune_best.pt`), а лучший собственный Transformer-пайплайн — `ViT LFPE + SSL + MixUp` (`0.753`, `checkpoints/vit_lfpe_bat_ablation_8_mixup_reg_best.pt`).
 
-На графике ниже показана динамика validation macro-F1 по эпохам. Это те же ключевые scalar-метрики, которые логировались в ClearML, сохранённые отдельно в воспроизводимом виде.
+На графике ниже показана динамика validation macro-F1 по эпохам из исторических экспериментов.
 
 ![Кривые validation macro-F1](images/clearml_validation_macro_f1_curves.png)
 
@@ -296,10 +306,10 @@ BEATs предобучен на широком аудио-домене и хор
 
 Основные причины ошибок:
 
-1. **Похожие виды.** Некоторые пары имеют близкие spectral centroid и похожую форму импульса. В 2-секундном окне модель видит не один идеальный call, а смесь импульсов, фона и тишины.
+1. **Похожие виды.** Некоторые пары имеют близкие spectral centroid и похожую форму импульса. В 2-секундном окне BEATs модель видит не один идеальный call, а смесь импульсов, фона и тишины; для log-STFT моделей 50-ms окно захватывает один импульс, но близкие виды всё равно остаются трудными.
 2. **Недостаток данных для Transformer.** 4348 train-записей мало для ViT без сильного внешнего предобучения.
 3. **Фоновый шум нельзя просто включить в loss.** Попытки маскировать фоновые патчи ухудшали MAE: модель начинала учить восстановление шума вместо полезных эхолокационных участков.
-4. **Короткий контекст.** 2 секунды достаточно для многих записей, но не всегда содержит одинаково информативные импульсы для всех видов.
+4. **Короткий контекст.** 50 ms достаточно для одного импульса, но не всегда содержит одинаково информативный call для всех видов; для BEATs 2 секунды дают больший контекст, но тоже не гарантируют один чистый импульс.
 
 ## Итог
 
