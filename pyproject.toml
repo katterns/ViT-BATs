@@ -15,6 +15,7 @@ dependencies = [
     "soundfile>=0.12",
     "scikit-learn>=1.5",
     "matplotlib>=3.9",
+    "librosa>=0.10",
 ]
 
 [tool.uv]

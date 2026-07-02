@@ -14,8 +14,8 @@ from pytorch_lightning.callbacks import Callback
 
 import config as cfg
 from bat.data import load_spec, load_split, make_loaders
-from bat.data.audio import CLIP_SEC, SPEC_H, SPEC_W
-from bat.lightning_utils import EpochLRScheduler, load_weights, log_dir, make_trainer
+from bat.data.audio import CLIP_SEC, SPEC_CHANNELS, SPEC_H, SPEC_W
+from bat.lightning_utils import EpochLRScheduler, load_weights, log_dir, make_trainer, resolve_resume
 from vit_bat import EMBED_DIM, PATCH_SIZE, BatViTPatchMAE, unpatchify_2d
 
 NOISE_PATCH_PERCENTILE = 25.0
@@ -29,7 +29,13 @@ RECON_DEMO_PNG = cfg.CHECKPOINT_DIR / "vit_lfpe_ssl_recon_demo.png"
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--resume", nargs="?", const=str(cfg.BEST_CKPT), default=None)
+    p.add_argument("--resume", nargs="?", const="__auto__", default=None,
+                   help="без пути: last.ckpt; .ckpt — полный resume; .pt — только веса")
+    p.add_argument(
+        "--full",
+        action="store_true",
+        help="pretrain на full cleaned/ (нечестно vs subset CNN; только ablation)",
+    )
     return p.parse_args()
 
 
@@ -45,10 +51,19 @@ def set_epoch_lr(epoch, optimizer):
 
 
 class SaveBestSSL(Callback):
-    def __init__(self):
-        self.best = float("inf")
+    def __init__(self, initial_best=float("inf"), data_tag="subset_200"):
+        self.best = float(initial_best)
+        self.data_tag = data_tag
 
-    def on_validation_epoch_end(self, trainer, pl_module):
+    def state_dict(self):
+        return {"best": self.best}
+
+    def load_state_dict(self, state_dict):
+        self.best = float(state_dict.get("best", self.best))
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        if trainer.sanity_checking:
+            return
         val = trainer.callback_metrics.get("val_loss")
         if val is None or float(val) >= self.best:
             return
@@ -60,10 +75,13 @@ class SaveBestSSL(Callback):
             "model_name": "vit_lfpe_mae",
             "config": {
                 "clip_sec": CLIP_SEC,
+                "spec_channels": SPEC_CHANNELS,
                 "spec_hw": (SPEC_H, SPEC_W),
                 "patch_size": PATCH_SIZE,
                 "embed_dim": EMBED_DIM,
                 "sem_contrastive_weight": cfg.SEM_CONTRASTIVE_WEIGHT,
+                "preprocess": "nabat_v2",
+                "data": self.data_tag,
             },
             "val_recon_loss": self.best,
             "epoch": trainer.current_epoch,
@@ -128,16 +146,17 @@ def save_recon_demo(model, val_df, device, out_path):
     )
     pf, pt = PATCH_SIZE
     gf, gt = model.grid_shape
-    pred_p = pred.view(1, gf, gt, pf, pt)
-    tgt_p = targets.view(1, gf, gt, pf, pt)
+    pred_p = pred.view(1, gf, gt, SPEC_CHANNELS, pf, pt)
+    tgt_p = targets.view(1, gf, gt, SPEC_CHANNELS, pf, pt)
     m = mask.view(1, gf, gt).bool()
     recon_p = tgt_p.clone()
     recon_p[m] = pred_p[m]
     fig, axes = plt.subplots(1, 2, figsize=(10, 3.5))
-    axes[0].imshow(x[0, 0].cpu(), origin="lower", cmap="magma", aspect="auto")
+    axes[0].imshow(x[0].permute(1, 2, 0).cpu().clamp(0, 1), origin="lower", aspect="auto")
     axes[0].set_title("target")
     axes[0].axis("off")
-    axes[1].imshow(unpatchify_2d(recon_p[0], PATCH_SIZE).cpu(), origin="lower", cmap="magma", aspect="auto")
+    recon = unpatchify_2d(recon_p, PATCH_SIZE, SPEC_CHANNELS)[0]
+    axes[1].imshow(recon.permute(1, 2, 0).cpu().clamp(0, 1), origin="lower", aspect="auto")
     axes[1].set_title("reconstruction")
     axes[1].axis("off")
     fig.suptitle(f"{row['species']}/{row['filename']}", fontsize=10)
@@ -149,29 +168,48 @@ def save_recon_demo(model, val_df, device, out_path):
 
 def main():
     args = parse_args()
-    resume = Path(args.resume) if args.resume else None
 
     pl.seed_everything(cfg.RANDOM_SEED)
     cfg.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
-    train_df, val_df, _, _, _ = load_split(cfg.METADATA_PATH, cfg.DATA_DIR)
+    if args.full:
+        meta_path, data_dir = cfg.METADATA_PATH, cfg.DATA_DIR
+        print("SSL data: full cleaned/ (ablation, not fair vs subset baselines)", flush=True)
+    else:
+        meta_path, data_dir = cfg.SSL_METADATA_PATH, cfg.SSL_DATA_DIR
+        print(f"SSL data: {data_dir.name}/ (same subset + split as supervised)", flush=True)
+
+    train_df, val_df, _, _, _ = load_split(meta_path, data_dir)
+    print(f"SSL: {len(train_df)} train + {len(val_df)} val pulses", flush=True)
     mode = "dual" if cfg.SEM_CONTRASTIVE_WEIGHT > 0 else "ssl"
     train_loader, val_loader = make_loaders(train_df, val_df, mode=mode, val_mode="ssl")
 
     module = SSLModule()
-    if resume and resume.is_file():
-        load_weights(module.model, resume)
+    weights_ckpt, pl_ckpt, completed_epochs = resolve_resume(args.resume, "ssl_pretrain", cfg.BEST_CKPT)
+    initial_best = float("inf")
+    if weights_ckpt is not None:
+        meta = load_weights(module.model, weights_ckpt)
+        initial_best = float(meta.get("val_recon_loss", float("inf")))
+        print(
+            f"resume weights: {weights_ckpt} (epoch={meta.get('epoch', '?')}, next epoch={completed_epochs})",
+            flush=True,
+        )
+    elif pl_ckpt is not None:
+        print(f"resume trainer: {pl_ckpt}", flush=True)
 
+    data_tag = "full_cleaned" if args.full else "subset_200"
     trainer = make_trainer(
         "ssl_pretrain",
         max_epochs=cfg.MAX_EPOCHS,
         monitor="val_loss",
         mode="min",
         patience=cfg.PATIENCE,
-        extra_callbacks=[SaveBestSSL(), EpochLRScheduler(set_epoch_lr)],
+        extra_callbacks=[SaveBestSSL(initial_best, data_tag=data_tag), EpochLRScheduler(set_epoch_lr)],
+        continuing_run=args.resume is not None,
+        restore_completed_epochs=completed_epochs if pl_ckpt is None else 0,
     )
     print(f"logs: {log_dir('ssl_pretrain')}")
-    trainer.fit(module, train_loader, val_loader)
+    trainer.fit(module, train_loader, val_loader, ckpt_path=str(pl_ckpt) if pl_ckpt else None)
 
     if cfg.BEST_CKPT.is_file():
         load_weights(module.model, cfg.BEST_CKPT)

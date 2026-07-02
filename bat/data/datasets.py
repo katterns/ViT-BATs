@@ -25,7 +25,7 @@ class BatDataset(Dataset):
             left, right = split_spec_overlap(full)
             return full, left, right
 
-        spec_aug = self.training and self.mode == "supervised"
+        spec_aug = self.training and self.mode == "supervised" and cfg.SUPERVISED_SPEC_AUG
         x = load_spec(row["path"], self.training, self.rng, spec_aug=spec_aug, pulse_center=center)
         if self.mode == "supervised":
             return x, row["label"]

@@ -1,10 +1,13 @@
 from pathlib import Path
 import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-PATCH_SIZE = (8, 16)
+from bat.data.audio import SPEC_CHANNELS
+
+PATCH_SIZE = (10, 10)
 EMBED_DIM = 384
 ENC_DEPTH = 10
 DEC_DEPTH = 3
@@ -40,11 +43,12 @@ class LearnableFourierPosEncoding(nn.Module):
 
 
 class ConvStemPatchEmbed(nn.Module):
-    def __init__(self, embed_dim=384, patch_size=(16, 16), stem_dim=48):
+    def __init__(self, embed_dim=384, patch_size=(16, 16), stem_dim=48, in_channels=None):
         super().__init__()
+        in_channels = in_channels or SPEC_CHANNELS
         self.patch_size = patch_size
         self.stem = nn.Sequential(
-            nn.Conv2d(1, stem_dim, 3, padding=1, bias=False),
+            nn.Conv2d(in_channels, stem_dim, 3, padding=1, bias=False),
             nn.GroupNorm(8, stem_dim),
             nn.GELU(),
             nn.Conv2d(stem_dim, stem_dim, 3, padding=1, bias=False),
@@ -201,12 +205,24 @@ def nt_xent_loss(z1, z2, temperature=0.07):
     logits = logits.masked_fill(torch.eye(2 * batch_size, device=features.device, dtype=torch.bool), float("-inf"))
     return F.cross_entropy(logits, labels)
 
-def unpatchify_2d(patches, patch_size):
+def unpatchify_2d(patches, patch_size, channels=SPEC_CHANNELS):
     pf, pt = patch_size
+    if patches.dim() == 6:
+        b, gf, gt, c, _, _ = patches.shape
+        return patches.permute(0, 3, 1, 4, 2, 5).reshape(b, c, gf * pf, gt * pt)
     if patches.dim() == 5:
         b, gf, gt, _, _ = patches.shape
-        return patches.permute(0, 1, 3, 2, 4).reshape(b, gf * pf, gt * pt)
-    return patches.permute(0, 2, 1, 3).reshape(patches.shape[0] * pf, patches.shape[1] * pt)
+        return patches.permute(0, 1, 3, 2, 4).reshape(b, 1, gf * pf, gt * pt)
+
+    b, n, d = patches.shape
+    patch_dim = channels * pf * pt
+    if d != patch_dim:
+        raise ValueError(f"patch dim {d} != channels*patch_h*patch_w {patch_dim}")
+    side = int(math.sqrt(n))
+    if side * side != n:
+        raise ValueError(f"cannot infer square grid from {n} patches")
+    patches = patches.view(b, side, side, channels, pf, pt)
+    return unpatchify_2d(patches, patch_size, channels)
 
 
 class BatViTEncoder(nn.Module):
@@ -270,7 +286,7 @@ class BatViTPatchMAE(nn.Module):
         self.encoder = BatViTEncoder(spec_h, spec_w, embed_dim, ENC_DEPTH, n_heads, patch_size)
         self.grid_shape = self.encoder.grid_shape
         self.num_patches = self.encoder.num_patches
-        self.patch_dim = patch_size[0] * patch_size[1]
+        self.patch_dim = SPEC_CHANNELS * patch_size[0] * patch_size[1]
 
         self.decoder_embed = nn.Linear(embed_dim, dec_dim)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, dec_dim))
@@ -353,6 +369,10 @@ def load_ssl_encoder(classifier, ckpt_path, device, spec_hw, patch_size=PATCH_SI
 
     ckpt = torch.load(path, map_location=device, weights_only=False)
     ckpt_cfg = ckpt.get("config", {})
+    if ckpt_cfg.get("preprocess") not in (None, "nabat_v2"):
+        raise ValueError(f"SSL ckpt preprocess={ckpt_cfg.get('preprocess')!r}, need nabat_v2")
+    if ckpt_cfg.get("spec_channels") not in (None, SPEC_CHANNELS):
+        raise ValueError(f"SSL ckpt spec_channels={ckpt_cfg.get('spec_channels')}, need {SPEC_CHANNELS}")
     expected = {"spec_hw": spec_hw, "patch_size": patch_size, "embed_dim": embed_dim}
     for key, val in expected.items():
         actual = ckpt_cfg.get(key)
@@ -363,5 +383,5 @@ def load_ssl_encoder(classifier, ckpt_path, device, spec_hw, patch_size=PATCH_SI
 
     enc = ckpt.get("encoder_state")
     if not enc:
-        raise KeyError("В чекпоинте нет encoder_state")
+        raise KeyError("No encoder_state in checkpoint")
     classifier.encoder.load_state_dict(enc, strict=True)

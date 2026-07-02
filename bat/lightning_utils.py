@@ -26,17 +26,98 @@ def log_dir(run_name: str) -> Path:
     return cfg.CHECKPOINT_DIR / "lightning_logs" / run_name
 
 
-def make_trainer(run_name, *, max_epochs, monitor, mode, patience=None, extra_callbacks=None):
+def last_ckpt_path(run_name: str) -> Path:
+    return log_dir(run_name) / "pl_ckpt" / "last.ckpt"
+
+
+def find_trainer_ckpt(run_name: str) -> Path | None:
+    last = last_ckpt_path(run_name)
+    return last if last.is_file() else None
+
+
+def _completed_epochs_from_pt(path: Path) -> int:
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    epoch = ckpt.get("epoch")
+    if epoch is None:
+        return 0
+    return int(epoch) + 1
+
+
+def resolve_resume(resume, run_name, best_ckpt):
+    """__auto__ / .ckpt -> полный resume; .pt -> веса + эпоха из meta."""
+    if resume is None:
+        return None, None, 0
+
+    path = Path(resume)
+    if str(resume) == "__auto__":
+        pl_ckpt = find_trainer_ckpt(run_name)
+        if pl_ckpt is not None:
+            return None, pl_ckpt, 0
+        best = Path(best_ckpt)
+        if best.is_file():
+            completed = _completed_epochs_from_pt(best)
+            print(
+                f"WARNING: {last_ckpt_path(run_name)} не найден — resume с best.pt (next epoch={completed})",
+                flush=True,
+            )
+            return best, None, completed
+        return None, None, 0
+
+    if path.suffix == ".ckpt":
+        if not path.is_file():
+            raise FileNotFoundError(f"Lightning checkpoint не найден: {path}")
+        return None, path, 0
+
+    if not path.is_file():
+        raise FileNotFoundError(f"Checkpoint не найден: {path}")
+    return path, None, _completed_epochs_from_pt(path)
+
+
+def _latest_log_version(root: Path) -> int:
+    versions = []
+    for sub in ("csv", "tb"):
+        base = root / sub
+        if not base.is_dir():
+            continue
+        for p in base.iterdir():
+            if p.name.startswith("version_"):
+                try:
+                    versions.append(int(p.name.split("_", 1)[1]))
+                except ValueError:
+                    pass
+    return max(versions) if versions else 0
+
+
+def make_trainer(
+    run_name,
+    *,
+    max_epochs,
+    monitor,
+    mode,
+    patience=None,
+    extra_callbacks=None,
+    epoch_log=None,
+    continuing_run=False,
+    restore_completed_epochs=0,
+):
     root = log_dir(run_name)
     root.mkdir(parents=True, exist_ok=True)
+    log_version = _latest_log_version(root) if continuing_run else None
     callbacks = list(extra_callbacks or [])
+    if restore_completed_epochs > 0:
+        callbacks.append(RestoreEpoch(restore_completed_epochs))
+    callbacks.append(EpochSummary(epoch_log or root / "epoch_log.txt"))
+    callbacks.append(SaveLast(run_name))
     if patience:
         callbacks.append(EarlyStopping(monitor=monitor, patience=patience, mode=mode))
     return pl.Trainer(
         max_epochs=max_epochs,
         accelerator="auto",
         devices=1,
-        logger=[CSVLogger(save_dir=root, name="csv"), TensorBoardLogger(save_dir=root, name="tb")],
+        logger=[
+            CSVLogger(save_dir=root, name="csv", version=log_version),
+            TensorBoardLogger(save_dir=root, name="tb", version=log_version),
+        ],
         callbacks=callbacks,
         gradient_clip_val=1.0,
         default_root_dir=root,
@@ -53,18 +134,74 @@ class EpochLRScheduler(Callback):
         pl_module.log("lr", lr, on_epoch=True, prog_bar=True)
 
 
+class RestoreEpoch(Callback):
+    def __init__(self, completed_epochs: int = 0):
+        self.completed_epochs = int(completed_epochs)
+
+    def on_fit_start(self, trainer, pl_module):
+        if self.completed_epochs <= 0:
+            return
+        trainer.fit_loop.epoch_progress.current.completed = self.completed_epochs
+        trainer.fit_loop.epoch_progress.current.processed = self.completed_epochs
+        print(f"resume epoch: continue from {self.completed_epochs}", flush=True)
+
+
+class SaveLast(Callback):
+    def __init__(self, run_name: str):
+        self.path = last_ckpt_path(run_name)
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        if trainer.sanity_checking:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        trainer.save_checkpoint(self.path)
+
+
+class EpochSummary(Callback):
+    def __init__(self, log_path=None):
+        self.log_path = Path(log_path) if log_path else None
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        if trainer.sanity_checking:
+            return
+        m = trainer.callback_metrics
+        epoch = trainer.current_epoch
+        line = (
+            f"epoch={epoch:>2d}  "
+            f"train_loss={float(m.get('train_loss', float('nan'))):.4f}  "
+            f"val_loss={float(m.get('val_loss', float('nan'))):.4f}  "
+            f"macro_f1={float(m.get('macro_f1', float('nan'))):.4f}  "
+            f"acc={float(m.get('acc', float('nan'))):.4f}"
+        )
+        print(line, flush=True)
+        if self.log_path is not None:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+
+
 class SaveBest(Callback):
-    def __init__(self, ckpt_path, model_name, label2id, id2label, extra=None):
+    def __init__(self, ckpt_path, model_name, label2id, id2label, extra=None, initial_best_f1=-1.0):
         self.ckpt_path = Path(ckpt_path)
         self.model_name = model_name
         self.label2id = label2id
         self.id2label = id2label
         self.extra = extra or {}
-        self.best_f1 = -1.0
+        self.best_f1 = float(initial_best_f1)
 
-    def on_validation_epoch_end(self, trainer, pl_module):
+    def state_dict(self):
+        return {"best_f1": self.best_f1}
+
+    def load_state_dict(self, state_dict):
+        self.best_f1 = float(state_dict.get("best_f1", self.best_f1))
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        if trainer.sanity_checking:
+            return
         f1 = trainer.callback_metrics.get("macro_f1")
-        if f1 is None or float(f1) <= self.best_f1:
+        if f1 is None or not float(f1) == float(f1):  # None or NaN
+            return
+        if float(f1) <= self.best_f1:
             return
         self.best_f1 = float(f1)
         self.ckpt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -127,8 +264,8 @@ class ClassifierModule(pl.LightningModule):
     def on_validation_epoch_end(self):
         y = torch.cat(self._y)
         pred = torch.cat(self._pred)
-        self.log("macro_f1", f1_score(y, pred, average="macro", zero_division=0), prog_bar=True)
-        self.log("acc", accuracy_score(y, pred), prog_bar=True)
+        self.log("macro_f1", f1_score(y, pred, average="macro", zero_division=0), prog_bar=True, on_epoch=True)
+        self.log("acc", accuracy_score(y, pred), prog_bar=True, on_epoch=True)
 
     def configure_optimizers(self):
         opt = optim.AdamW(self.param_groups, weight_decay=self.weight_decay)

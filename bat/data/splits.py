@@ -1,28 +1,66 @@
+import hashlib
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
 import config as cfg
-from bat.data.audio import find_pulses, read_wav
+from bat.data.audio import filter_nabat_pulses, find_pulses, read_wav
+
+PULSE_CACHE_DIR = cfg.CHECKPOINT_DIR / "pulse_cache"
 
 
-def expand_by_pulses(df):
+def _pulse_cache_path(wav_path):
+    p = Path(wav_path).resolve()
+    st = p.stat()
+    key = f"{p}|{st.st_mtime_ns}|{st.st_size}"
+    digest = hashlib.sha1(key.encode()).hexdigest()
+    return PULSE_CACHE_DIR / f"{digest}.json"
+
+
+def get_pulse_centers(wav_path):
+    p = Path(wav_path)
+    cache = _pulse_cache_path(p)
+    if cache.is_file():
+        data = json.loads(cache.read_text())
+        st = p.stat()
+        if data.get("mtime_ns") == st.st_mtime_ns and data.get("size") == st.st_size:
+            return data["centers"]
+
+    y = read_wav(p)
+    centers = find_pulses(y)
+    if not centers:
+        centers = [int(np.argmax(y ** 2))]
+
+    PULSE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    st = p.stat()
+    cache.write_text(json.dumps({"mtime_ns": st.st_mtime_ns, "size": st.st_size, "centers": centers}))
+    return centers
+
+
+def expand_by_pulses(df, desc="pulses"):
     """Один wav -> несколько строк (по одной на импульс)."""
     rows = []
-    for _, row in df.iterrows():
-        y = read_wav(row["path"])
-        centers = find_pulses(y)
-        if not centers:
-            centers = [int(np.argmax(y ** 2))]
-
+    n = len(df)
+    rejected = 0
+    for i, row in enumerate(df.itertuples(index=False), 1):
+        if i == 1 or i % 25 == 0 or i == n:
+            print(f"{desc}: {i}/{n}", flush=True)
+        centers = get_pulse_centers(row.path)
+        centers, skipped = filter_nabat_pulses(row.path, centers)
+        rejected += skipped
         for center in centers:
             rows.append({
-                "path": row["path"],
-                "species": row["species"],
-                "filename": row["filename"],
-                "label": row["label"],
+                "path": row.path,
+                "species": row.species,
+                "filename": row.filename,
+                "label": row.label,
                 "pulse_center": center,
             })
+    if cfg.NABAT_QUALITY_FILTER:
+        print(f"{desc}: rejected {rejected} windows", flush=True)
     return pd.DataFrame(rows)
 
 
@@ -43,8 +81,14 @@ def load_split(metadata_path, data_dir, expand_pulses=True):
         stratify=df["label"],
     )
     if expand_pulses:
-        train_df = expand_by_pulses(train_files)
-        val_df = expand_by_pulses(val_files)
+        print(
+            f"load_split: {len(train_files)} train + {len(val_files)} val files, "
+            "detecting pulses (first run is slow, then cached)...",
+            flush=True,
+        )
+        train_df = expand_by_pulses(train_files, desc="train pulses")
+        val_df = expand_by_pulses(val_files, desc="val pulses")
+        print(f"load_split: {len(train_df)} train + {len(val_df)} val examples", flush=True)
     else:
         train_df = train_files.reset_index(drop=True)
         val_df = val_files.reset_index(drop=True)

@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 import config as cfg
 from bat.data import load_split
-from bat.lightning_utils import ClassifierModule, SaveBest, final_eval, load_weights, log_dir, make_trainer
+from bat.lightning_utils import ClassifierModule, SaveBest, final_eval, load_weights, log_dir, make_trainer, resolve_resume
 from beats_bat import BEATsBatClassifier, build_beats_random, load_beats_checkpoint, waveform_to_beats_fbank
 
 TARGET_SR = 192_000
@@ -101,9 +101,9 @@ def make_loaders(train_df, val_df):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--resume", nargs="?", const=str(BEST_CKPT), default=None)
+    p.add_argument("--resume", nargs="?", const="__auto__", default=None,
+                   help="без пути: last.ckpt; .ckpt — полный resume; .pt — только веса")
     args = p.parse_args()
-    resume = Path(args.resume) if args.resume else None
 
     pl.seed_everything(cfg.RANDOM_SEED)
     cfg.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
@@ -131,16 +131,29 @@ def main():
         weight_decay=WD, plateau_patience=PLATEAU_PATIENCE, lr_factor=LR_FACTOR, lr_min=LR_MIN,
         label_smoothing=LS,
     )
-    if resume and resume.is_file():
-        load_weights(model, resume)
+
+    weights_ckpt, pl_ckpt, completed_epochs = resolve_resume(args.resume, "beats_baseline", BEST_CKPT)
+    initial_best = -1.0
+    if weights_ckpt is not None:
+        meta = load_weights(model, weights_ckpt)
+        initial_best = float(meta.get("val_macro_f1", -1.0))
+        print(
+            f"resume weights: {weights_ckpt} (saved epoch={meta.get('epoch', '?')}, "
+            f"macro_f1={initial_best:.4f}, next epoch={completed_epochs})",
+            flush=True,
+        )
+    elif pl_ckpt is not None:
+        print(f"resume trainer: {pl_ckpt}", flush=True)
 
     extra = {"clip_sec": 2.0, "pretrained_loaded": pretrained_ok, "backbone_lr": backbone_lr, "head_lr": HEAD_LR}
     trainer = make_trainer(
         "beats_baseline", max_epochs=MAX_EPOCHS, monitor="macro_f1", mode="max", patience=PATIENCE,
-        extra_callbacks=[SaveBest(BEST_CKPT, "beats_bat", label2id, id2label, extra=extra)],
+        extra_callbacks=[SaveBest(BEST_CKPT, "beats_bat", label2id, id2label, extra=extra, initial_best_f1=initial_best)],
+        continuing_run=args.resume is not None,
+        restore_completed_epochs=completed_epochs if pl_ckpt is None else 0,
     )
     print(f"logs: {log_dir('beats_baseline')}")
-    trainer.fit(module, train_loader, val_loader)
+    trainer.fit(module, train_loader, val_loader, ckpt_path=str(pl_ckpt) if pl_ckpt else None)
 
     if BEST_CKPT.is_file():
         load_weights(model, BEST_CKPT)
