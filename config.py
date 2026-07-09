@@ -3,6 +3,7 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parent
 
 # data
+DATA_MANIFEST_PATH = PROJECT_DIR / "data" / "audio_metadata_cleaned.csv"
 DATA_DIR = PROJECT_DIR / "cleaned"
 METADATA_PATH = DATA_DIR / "audio_metadata_cleaned.csv"
 FT_DATA_DIR = PROJECT_DIR / "cleaned_subset_200"

@@ -41,10 +41,17 @@ def main():
         weight_decay=1e-4, plateau_patience=6, lr_factor=0.5, lr_min=1e-7, label_smoothing=0.1,
         mixup_alpha=cfg.FT_MIXUP_ALPHA,
     )
-    if ssl_ok:
-        load_ssl_encoder(model, cfg.BEST_CKPT, next(model.parameters()).device, (SPEC_H, SPEC_W))
 
     weights_ckpt, pl_ckpt, completed_epochs = resolve_resume(args.resume, "finetune", cfg.FT_BEST_CKPT)
+    if ssl_ok and weights_ckpt is None and pl_ckpt is None:
+        load_ssl_encoder(model, cfg.BEST_CKPT, next(model.parameters()).device, (SPEC_H, SPEC_W))
+    elif ssl_ok:
+        print("skip SSL load: resuming finetune checkpoint (encoder comes from resume)", flush=True)
+    elif args.no_ssl:
+        print("SSL disabled: --no-ssl", flush=True)
+    elif not cfg.LOAD_SSL_PRETRAIN:
+        print("SSL disabled: LOAD_SSL_PRETRAIN=False", flush=True)
+
     initial_best = -1.0
     if weights_ckpt is not None:
         meta = load_weights(model, weights_ckpt)

@@ -1,5 +1,3 @@
-"""Один раз прогоняет log-STFT кэш для всех (path, pulse_center) в split."""
-
 import argparse
 import sys
 from pathlib import Path

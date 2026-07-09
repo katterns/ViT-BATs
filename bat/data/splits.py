@@ -64,7 +64,7 @@ def expand_by_pulses(df, desc="pulses"):
     return pd.DataFrame(rows)
 
 
-def load_split(metadata_path, data_dir, expand_pulses=True):
+def load_split(metadata_path, data_dir, expand_pulses=True, expand_train=True):
     df = pd.read_csv(metadata_path)
     df["path"] = df.apply(lambda r: data_dir / r["species"] / r["filename"], axis=1)
     df = df[df["path"].apply(lambda p: p.exists())].copy()
@@ -81,14 +81,18 @@ def load_split(metadata_path, data_dir, expand_pulses=True):
         stratify=df["label"],
     )
     if expand_pulses:
-        print(
-            f"load_split: {len(train_files)} train + {len(val_files)} val files, "
-            "detecting pulses (first run is slow, then cached)...",
-            flush=True,
-        )
-        train_df = expand_by_pulses(train_files, desc="train pulses")
+        parts = []
+        if expand_train:
+            parts.append(f"{len(train_files)} train")
+        parts.append(f"{len(val_files)} val")
+        print(f"load_split: {' + '.join(parts)} files, pulse_cache + spec_cache...", flush=True)
+        if expand_train:
+            train_df = expand_by_pulses(train_files, desc="train pulses")
+        else:
+            train_df = train_files.reset_index(drop=True)
         val_df = expand_by_pulses(val_files, desc="val pulses")
-        print(f"load_split: {len(train_df)} train + {len(val_df)} val examples", flush=True)
+        train_unit = "examples" if expand_train else "files"
+        print(f"load_split: {len(train_df)} train {train_unit} + {len(val_df)} val examples", flush=True)
     else:
         train_df = train_files.reset_index(drop=True)
         val_df = val_files.reset_index(drop=True)

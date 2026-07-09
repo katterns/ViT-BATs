@@ -385,3 +385,8 @@ def load_ssl_encoder(classifier, ckpt_path, device, spec_hw, patch_size=PATCH_SI
     if not enc:
         raise KeyError("No encoder_state in checkpoint")
     classifier.encoder.load_state_dict(enc, strict=True)
+    print(
+        f"loaded SSL encoder: {path} (epoch={ckpt.get('epoch', '?')}, "
+        f"val_recon_loss={ckpt.get('val_recon_loss', float('nan')):.4f})",
+        flush=True,
+    )

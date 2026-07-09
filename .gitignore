@@ -9,4 +9,6 @@ presentation.pdf
 Презентация1.pdf
 .env
 *.csv
+!data/audio_metadata_cleaned.csv
+!NABat_Species_Codes.csv
 .DS_Store
