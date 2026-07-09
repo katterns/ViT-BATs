@@ -2,7 +2,7 @@
 
 Технический README: откуда взять данные, как собрать локальный корпус и в каком порядке запускать скрипты обучения.
 
-Подробное описание экспериментов — в [`FULL_DESCRIPTION.md`](FULL_DESCRIPTION.md) и [`ARTICLE.md`](ARTICLE.md).
+Подробное описание экспериментов — в [`FULL_DESCRIPTION.md`](reports/FULL_DESCRIPTION.md) и [`ARTICLE.md`](reports/ARTICLE.md).
 
 ## Требования
 
