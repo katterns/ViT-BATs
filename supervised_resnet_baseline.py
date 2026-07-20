@@ -9,8 +9,8 @@ import torch.nn as nn
 from torchvision.models import resnet18
 
 import config as cfg
+from bat.data import load_paper_trainval, make_loaders
 from bat.data.audio import SPEC_CHANNELS
-from bat.data import load_split, make_loaders
 from bat.lightning_utils import ClassifierModule, SaveBest, final_eval, load_weights, log_dir, make_trainer, resolve_resume
 
 BEST_CKPT = cfg.CHECKPOINT_DIR / "resnet18_bat_best.pt"
@@ -42,8 +42,11 @@ def main():
     pl.seed_everything(cfg.RANDOM_SEED)
     cfg.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
-    train_df, val_df, label2id, id2label, species = load_split(cfg.FT_METADATA_PATH, cfg.FT_DATA_DIR)
-    train_loader, val_loader = make_loaders(train_df, val_df, mode="supervised", balanced=True)
+    train_df, val_df, label2id, id2label, species = load_paper_trainval()
+    train_loader, val_loader = make_loaders(
+        train_df, val_df, mode="supervised", balanced=True,
+        cache_dir=cfg.NABAT_PAPER_SPEC_CACHE,
+    )
 
     model = ResNet18Bat(len(species))
     module = ClassifierModule(

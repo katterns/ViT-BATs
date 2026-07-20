@@ -2,12 +2,11 @@ import hashlib
 import json
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
 import config as cfg
-from bat.data.audio import filter_nabat_pulses, find_pulses, read_wav
+from bat.data.audio import find_pulses
 
 PULSE_CACHE_DIR = cfg.CHECKPOINT_DIR / "pulse_cache"
 
@@ -15,7 +14,7 @@ PULSE_CACHE_DIR = cfg.CHECKPOINT_DIR / "pulse_cache"
 def _pulse_cache_path(wav_path):
     p = Path(wav_path).resolve()
     st = p.stat()
-    key = f"{p}|{st.st_mtime_ns}|{st.st_size}"
+    key = f"{p}|{st.st_mtime_ns}|{st.st_size}|gottbat_v2"
     digest = hashlib.sha1(key.encode()).hexdigest()
     return PULSE_CACHE_DIR / f"{digest}.json"
 
@@ -29,10 +28,7 @@ def get_pulse_centers(wav_path):
         if data.get("mtime_ns") == st.st_mtime_ns and data.get("size") == st.st_size:
             return data["centers"]
 
-    y = read_wav(p)
-    centers = find_pulses(y)
-    if not centers:
-        centers = [int(np.argmax(y ** 2))]
+    centers = find_pulses(p)
 
     PULSE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     st = p.stat()
@@ -41,16 +37,17 @@ def get_pulse_centers(wav_path):
 
 
 def expand_by_pulses(df, desc="pulses"):
-    """Один wav -> несколько строк (по одной на импульс)."""
+    """Один wav -> несколько строк (по одной на импульс gottbat)."""
     rows = []
     n = len(df)
-    rejected = 0
+    skipped_files = 0
     for i, row in enumerate(df.itertuples(index=False), 1):
         if i == 1 or i % 25 == 0 or i == n:
             print(f"{desc}: {i}/{n}", flush=True)
         centers = get_pulse_centers(row.path)
-        centers, skipped = filter_nabat_pulses(row.path, centers)
-        rejected += skipped
+        if not centers:
+            skipped_files += 1
+            continue
         for center in centers:
             rows.append({
                 "path": row.path,
@@ -59,8 +56,8 @@ def expand_by_pulses(df, desc="pulses"):
                 "label": row.label,
                 "pulse_center": center,
             })
-    if cfg.NABAT_QUALITY_FILTER:
-        print(f"{desc}: rejected {rejected} windows", flush=True)
+    if skipped_files:
+        print(f"{desc}: skipped {skipped_files} files with no pulses", flush=True)
     return pd.DataFrame(rows)
 
 

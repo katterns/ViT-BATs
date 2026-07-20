@@ -7,10 +7,11 @@ from bat.data.audio import load_spec, split_spec_overlap
 
 
 class BatDataset(Dataset):
-    def __init__(self, df, training=False, mode="ssl"):
+    def __init__(self, df, training=False, mode="ssl", cache_dir=None):
         self.df = df.reset_index(drop=True)
         self.training = training
         self.mode = mode
+        self.cache_dir = cache_dir
         self.rng = np.random.default_rng(cfg.RANDOM_SEED)
 
     def __len__(self):
@@ -21,21 +22,29 @@ class BatDataset(Dataset):
         center = int(row["pulse_center"])
 
         if self.mode == "dual":
-            full = load_spec(row["path"], self.training, self.rng, pulse_center=center)
+            full = load_spec(
+                row["path"], self.training, self.rng,
+                pulse_center=center, cache_dir=self.cache_dir,
+            )
             left, right = split_spec_overlap(full)
             return full, left, right
 
         spec_aug = self.training and self.mode == "supervised" and cfg.SUPERVISED_SPEC_AUG
-        x = load_spec(row["path"], self.training, self.rng, spec_aug=spec_aug, pulse_center=center)
+        x = load_spec(
+            row["path"], self.training, self.rng,
+            spec_aug=spec_aug, pulse_center=center, cache_dir=self.cache_dir,
+        )
         if self.mode == "supervised":
             return x, row["label"]
         return x
 
 
-def make_loaders(train_df, val_df, mode="ssl", balanced=False, val_mode=None):
+def make_loaders(
+    train_df, val_df, mode="ssl", balanced=False, val_mode=None, cache_dir=None,
+):
     val_mode = val_mode or mode
-    train_ds = BatDataset(train_df, training=True, mode=mode)
-    val_ds = BatDataset(val_df, training=False, mode=val_mode)
+    train_ds = BatDataset(train_df, training=True, mode=mode, cache_dir=cache_dir)
+    val_ds = BatDataset(val_df, training=False, mode=val_mode, cache_dir=cache_dir)
     args = {"batch_size": cfg.BATCH_SIZE, "num_workers": cfg.NUM_WORKERS}
 
     if balanced:

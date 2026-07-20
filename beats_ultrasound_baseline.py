@@ -11,9 +11,9 @@ import torch
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 import config as cfg
-from bat.data import load_split
 from bat.lightning_utils import ClassifierModule, SaveBest, final_eval, load_weights, log_dir, make_trainer, resolve_resume
 from beats_bat import BEATsBatClassifier, build_beats_random, load_beats_checkpoint, waveform_to_beats_fbank
+import pandas as pd
 
 TARGET_SR = 192_000
 CLIP_SAMPLES = int(2.0 * TARGET_SR)
@@ -108,9 +108,15 @@ def main():
     pl.seed_everything(cfg.RANDOM_SEED)
     cfg.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
-    train_df, val_df, label2id, id2label, species = load_split(
-        cfg.FT_METADATA_PATH, cfg.FT_DATA_DIR, expand_pulses=False,
-    )
+    train_df = pd.read_csv(cfg.NABAT_PAPER_TRAINVAL_DIR / "files_train.csv")
+    val_df = pd.read_csv(cfg.NABAT_PAPER_TRAINVAL_DIR / "files_val.csv")
+    species = sorted(train_df["species"].unique())
+    label2id = {name: i for i, name in enumerate(species)}
+    id2label = {i: name for name, i in label2id.items()}
+    train_df = train_df.copy()
+    val_df = val_df.copy()
+    train_df["label"] = train_df["species"].map(label2id)
+    val_df["label"] = val_df["species"].map(label2id)
     train_loader, val_loader = make_loaders(train_df, val_df)
 
     if BEATS_PRETRAINED.is_file():

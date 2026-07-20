@@ -2,36 +2,15 @@ import numpy as np
 import soundfile as sf
 import torch
 import torch.nn.functional as F
-from scipy import signal
 
 import config as cfg
-from bat.data.nabat import (
-    CLIP_MS,
-    IMG_CHANNELS,
-    IMG_SIZE,
-    extract_clip as nabat_extract_clip,
-    load_wav_mono,
-    passes_quality_filter,
-    process_window,
-)
+from bat.data.nabat import CLIP_MS, IMG_CHANNELS, IMG_SIZE, make_spectrogram_chw, metadata_for_offset, process_file
 from bat.data.spec_cache import load_base_spec, save_base_spec
-
-# legacy pulse centers в splits.py считались при 192 kHz
-LEGACY_PULSE_SR = 192_000
-
-PULSE_ENERGY_WIN_MS = 2.0
-PULSE_THRESHOLD_RATIO = 0.15
-PULSE_MIN_GAP_MS = 20.0
 
 SPEC_H = IMG_SIZE
 SPEC_W = IMG_SIZE
 SPEC_CHANNELS = IMG_CHANNELS
 CLIP_SEC = CLIP_MS / 1000.0
-TARGET_SR = LEGACY_PULSE_SR  # для совместимости с pulse_center в CSV/кэше
-CLIP_SAMPLES = int(CLIP_SEC * LEGACY_PULSE_SR)
-
-MIN_FREQ = 5_000
-MAX_FREQ = 100_000
 
 WAV_GAIN_JITTER_DB = 3.0
 SPEC_TIME_MASK_MAX = 10
@@ -40,74 +19,79 @@ SPEC_GAIN_JITTER_DB = 6.0
 
 
 def read_wav(path):
+    """192 kHz mono — только для log-STFT pipeline, не для NABat v2."""
     y, sr = sf.read(str(path), always_2d=False)
     if y.ndim > 1:
         y = y.mean(axis=1)
-    if sr != LEGACY_PULSE_SR:
+    target_sr = 192_000
+    if sr != target_sr:
         old_t = np.linspace(0, len(y) / sr, len(y), endpoint=False)
-        new_t = np.linspace(0, len(y) / sr, int(len(y) * LEGACY_PULSE_SR / sr), endpoint=False)
+        new_t = np.linspace(0, len(y) / sr, int(len(y) * target_sr / sr), endpoint=False)
         y = np.interp(new_t, old_t, y)
     return y.astype(np.float32)
 
 
-def find_pulses(y):
-    win = int(PULSE_ENERGY_WIN_MS * LEGACY_PULSE_SR / 1000)
-    win = max(win, 1)
-    energy = y ** 2
-    smooth = np.convolve(energy, np.ones(win) / win, mode="same")
-    threshold = smooth.max() * PULSE_THRESHOLD_RATIO
-    min_distance = max(1, int(PULSE_MIN_GAP_MS * LEGACY_PULSE_SR / 1000))
-    peaks, _ = signal.find_peaks(smooth, height=threshold, distance=min_distance)
-    return peaks.tolist()
+def find_pulses(path):
+    """Импульсы = прошедшие окна gottbat process_file; ключ — offset (конец окна, ms)."""
+    data = process_file(path)
+    if data is None:
+        return []
+    return [m.offset for m in data.metadata]
 
 
-def _pulse_center_native(pulse_center: int, sr: int) -> int:
-    t_sec = float(pulse_center) / LEGACY_PULSE_SR
-    return int(round(t_sec * sr))
-
-
-def filter_nabat_pulses(path, pulse_centers):
-    """Оставляет только 50-ms окна, которые прошли NABat edge/SNR/amplitude checks."""
-    if not cfg.NABAT_QUALITY_FILTER:
-        return list(pulse_centers), 0
-
-    sig, sr = load_wav_mono(path)
-    kept = []
-    for pulse_center in pulse_centers:
-        center = _pulse_center_native(int(pulse_center), sr)
-        clip = nabat_extract_clip(sig, sr, center)
-        if passes_quality_filter(clip, sr):
-            kept.append(int(pulse_center))
-    return kept, len(pulse_centers) - len(kept)
-
-
-def compute_base_spec(path, pulse_center):
-    sig, sr = load_wav_mono(path)
-    center = _pulse_center_native(int(pulse_center), sr)
-    clip = nabat_extract_clip(sig, sr, center)
-    img = process_window(clip, sr, quality_filter=cfg.NABAT_QUALITY_FILTER)
+def compute_base_spec(path, window_offset):
+    data = process_file(path)
+    if data is None:
+        raise ValueError(f"cannot process {path}")
+    meta = metadata_for_offset(data, int(window_offset))
+    if meta is None:
+        raise ValueError(f"no pulse offset={window_offset} in {path}")
+    img = make_spectrogram_chw(meta.window, data.sample_rate)
     if img is None:
-        raise ValueError(f"NABat quality filter rejected {path} pulse_center={pulse_center}")
+        raise ValueError(f"cannot render spectrogram for {path} offset={window_offset}")
     return img.astype(np.float32)
 
 
-def get_or_build_base_spec(path, pulse_center):
-    cached = load_base_spec(path, pulse_center)
+def get_or_build_base_spec(path, window_offset, *, cache_dir=None):
+    cached = load_base_spec(path, window_offset, cache_dir=cache_dir)
     if cached is not None:
         return cached, True
-    spec = compute_base_spec(path, pulse_center)
-    save_base_spec(path, pulse_center, spec)
+    spec = compute_base_spec(path, window_offset)
+    save_base_spec(path, window_offset, spec, cache_dir=cache_dir)
     return spec, False
 
 
-def precompute_specs(df, desc="specs"):
-    n = len(df)
+def precompute_specs(df, desc="specs", *, cache_dir=None):
+    """Кэш по файлам: один process_file на wav, не на каждый импульс."""
+    from bat.data.nabat import make_spectrogram_chw, metadata_for_offset, process_file
+    from bat.data.spec_cache import load_base_spec, save_base_spec
+
     built = 0
-    for i, row in enumerate(df.itertuples(index=False), 1):
-        if i == 1 or i % 500 == 0 or i == n:
-            print(f"{desc}: {i}/{n}", flush=True)
-        _, hit = get_or_build_base_spec(row.path, int(row.pulse_center))
-        if not hit:
+    groups = list(df.groupby("path", sort=False))
+    n_files = len(groups)
+    for fi, (path, group) in enumerate(groups, 1):
+        if fi == 1 or fi % 50 == 0 or fi == n_files:
+            print(f"{desc}: files {fi}/{n_files} (built={built})", flush=True)
+
+        centers = [int(c) for c in group["pulse_center"].tolist()]
+        missing = [
+            c for c in centers
+            if load_base_spec(path, c, cache_dir=cache_dir) is None
+        ]
+        if not missing:
+            continue
+
+        data = process_file(path)
+        if data is None:
+            continue
+        for offset in missing:
+            meta = metadata_for_offset(data, offset)
+            if meta is None:
+                continue
+            img = make_spectrogram_chw(meta.window, data.sample_rate)
+            if img is None:
+                continue
+            save_base_spec(path, offset, img.astype(np.float32), cache_dir=cache_dir)
             built += 1
     return built
 
@@ -130,33 +114,19 @@ def _apply_spec_aug(x, rng):
     return x
 
 
-def load_spec(path, training, rng, spec_aug=False, pulse_center=None):
-    if pulse_center is not None and cfg.USE_SPEC_CACHE:
-        base, _ = get_or_build_base_spec(path, int(pulse_center))
+def load_spec(path, training, rng, spec_aug=False, pulse_center=None, cache_dir=None):
+    if pulse_center is None:
+        raise ValueError("pulse_center (gottbat window offset, ms) is required")
+
+    if cfg.USE_SPEC_CACHE:
+        base, _ = get_or_build_base_spec(path, int(pulse_center), cache_dir=cache_dir)
         x = torch.from_numpy(base.copy())
         if training and spec_aug:
             x = _apply_spec_aug(x, rng)
         return x
 
-    sig, sr = load_wav_mono(path)
-    if pulse_center is not None:
-        center = _pulse_center_native(int(pulse_center), sr)
-    else:
-        y = read_wav(path)
-        pulses = find_pulses(y)
-        if len(pulses) == 0:
-            center = _pulse_center_native(int(np.argmax(y ** 2)), sr)
-        elif training:
-            center = _pulse_center_native(pulses[rng.integers(len(pulses))], sr)
-        else:
-            center = _pulse_center_native(pulses[len(pulses) // 2], sr)
-
-    clip = nabat_extract_clip(sig, sr, center)
-
-    img = process_window(clip, sr, quality_filter=cfg.NABAT_QUALITY_FILTER)
-    if img is None:
-        raise ValueError(f"NABat quality filter rejected {path} pulse_center={pulse_center}")
-    x = torch.from_numpy(img.copy())
+    spec = compute_base_spec(path, int(pulse_center))
+    x = torch.from_numpy(spec.copy())
     if training and spec_aug:
         x = _apply_spec_aug(x.clone(), rng)
     return x

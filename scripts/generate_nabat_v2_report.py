@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import config as cfg
-from bat.data import load_split
+from bat.data import load_paper_trainval
 from bat.data.audio import (
     SPEC_CHANNELS,
     SPEC_H,
@@ -166,7 +166,10 @@ def plot_ssl_input(val_df, id2label, out_path: Path, n_examples: int = 3):
         center = int(row["pulse_center"])
         label = id2label[int(row["label"])]
         fname = Path(row["path"]).name
-        full = load_spec(row["path"], training=False, rng=rng, pulse_center=center)
+        full = load_spec(
+            row["path"], training=False, rng=rng, pulse_center=center,
+            cache_dir=cfg.NABAT_PAPER_SPEC_CACHE,
+        )
         left, right = split_spec_overlap(full)
         _show_rgb(axes[i, 0], full, f"{label} / {fname}\nfull spec")
         _show_rgb(axes[i, 1], left, f"left view ({view_frac:.0%})")
@@ -207,9 +210,7 @@ def main():
     if args.only_histogram:
         return
 
-    _, val_df, _, id2label, _ = load_split(
-        cfg.FT_METADATA_PATH, cfg.FT_DATA_DIR, expand_train=False
-    )
+    _, val_df, _, id2label, _ = load_paper_trainval()
 
     plot_ssl_input(val_df, id2label, SSL_INPUT_OUT)
     print(f"saved: {SSL_INPUT_OUT}", flush=True)

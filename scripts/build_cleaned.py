@@ -11,11 +11,12 @@ from pathlib import Path
 import pandas as pd
 import soundfile as sf
 
-# Исключены в USGS release (малый N): CORA, EUFL, LAXA, NYFE
+# Исключены в USGS release / статье (малый N): CORA, EUFL, LAXA, NYFE
 EXCLUDED_USGS_LOW_N = frozenset({"CORA", "EUFL", "LAXA", "NYFE"})
-# Дополнительно не вошли в локальный cleaned/
+# Дополнительно исключены в локальном cleaned/ (не в статье)
 EXCLUDED_EXTRA = frozenset({"EUPE", "IDPH", "MYAU", "MYVE", "NYHU"})
 EXCLUDED_SPECIES = EXCLUDED_USGS_LOW_N | EXCLUDED_EXTRA
+EXCLUDED_PAPER = EXCLUDED_USGS_LOW_N
 
 MIN_DURATION_SEC = 0.52
 MAX_DURATION_SEC = 8.09
@@ -38,14 +39,25 @@ def probe_wav_bytes(data: bytes) -> tuple[float, int]:
     return float(info.duration), int(info.samplerate)
 
 
-def scan_zip(zip_path: Path) -> list[dict]:
+def scan_zip(
+    zip_path: Path,
+    *,
+    excluded: frozenset[str],
+    duration_filter: bool = True,
+) -> list[dict]:
     species = zip_path.stem.upper()
-    if species in EXCLUDED_SPECIES:
+    if species in excluded:
         return []
 
     archive = zip_path.name
     rows: list[dict] = []
-    with zipfile.ZipFile(zip_path, "r") as zf:
+    try:
+        zf_ctx = zipfile.ZipFile(zip_path, "r")
+    except zipfile.BadZipFile as exc:
+        print(f"skip {zip_path.name}: corrupt zip ({exc})", flush=True)
+        return []
+
+    with zf_ctx as zf:
         for member in zf.namelist():
             if member.endswith("/") or not member.lower().endswith(".wav"):
                 continue
@@ -55,7 +67,9 @@ def scan_zip(zip_path: Path) -> list[dict]:
             except Exception as exc:
                 print(f"skip {species}/{filename}: {exc}", flush=True)
                 continue
-            if duration < MIN_DURATION_SEC or duration > MAX_DURATION_SEC:
+            if duration_filter and (
+                duration < MIN_DURATION_SEC or duration > MAX_DURATION_SEC
+            ):
                 continue
             rows.append({
                 "species": species,
@@ -67,7 +81,12 @@ def scan_zip(zip_path: Path) -> list[dict]:
     return rows
 
 
-def scan_raw(raw_dir: Path) -> pd.DataFrame:
+def scan_raw(
+    raw_dir: Path,
+    *,
+    excluded: frozenset[str],
+    duration_filter: bool = True,
+) -> pd.DataFrame:
     rows: list[dict] = []
     zips = sorted(raw_dir.glob("*.zip"))
     if not zips:
@@ -76,7 +95,7 @@ def scan_raw(raw_dir: Path) -> pd.DataFrame:
     for i, zip_path in enumerate(zips, 1):
         species = zip_path.stem.upper()
         print(f"scan {i}/{len(zips)} {zip_path.name}", flush=True)
-        rows.extend(scan_zip(zip_path))
+        rows.extend(scan_zip(zip_path, excluded=excluded, duration_filter=duration_filter))
 
     if not rows:
         raise RuntimeError("no WAV passed filters")
@@ -178,7 +197,14 @@ def main() -> None:
         action="store_true",
         help="не сканировать zip; взять готовый --manifest и распаковать в --out",
     )
+    p.add_argument(
+        "--paper-filter",
+        action="store_true",
+        help="фильтрация как в статье NABat ML: только 4 редких класса + длительность 0.52–8.09 с (31 класс)",
+    )
     args = p.parse_args()
+
+    excluded = EXCLUDED_PAPER if args.paper_filter else EXCLUDED_SPECIES
 
     if args.from_manifest:
         if not args.manifest.is_file():
@@ -186,12 +212,13 @@ def main() -> None:
         df = pd.read_csv(args.manifest)
         print(f"manifest {args.manifest}: {len(df)} rows, {df['species'].nunique()} classes", flush=True)
     else:
-        df = scan_raw(args.raw)
+        df = scan_raw(args.raw, excluded=excluded)
         write_manifest(df, args.manifest)
         write_manifest(df, args.out / "audio_metadata_cleaned.csv")
+        filter_label = "paper (31 classes)" if args.paper_filter else "local cleaned (26 classes)"
         print(
             f"manifest: {len(df)} files, {df['species'].nunique()} classes "
-            f"(duration {MIN_DURATION_SEC}–{MAX_DURATION_SEC} s)",
+            f"({filter_label}, duration {MIN_DURATION_SEC}–{MAX_DURATION_SEC} s)",
             flush=True,
         )
         print(f"saved {args.manifest}", flush=True)

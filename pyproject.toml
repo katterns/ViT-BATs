@@ -16,6 +16,7 @@ dependencies = [
     "scikit-learn>=1.5",
     "matplotlib>=3.9",
     "librosa>=0.10",
+    "tensorflow>=2.21",
 ]
 
 [tool.uv]

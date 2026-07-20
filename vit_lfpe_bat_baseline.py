@@ -7,7 +7,7 @@ warnings.filterwarnings("ignore")
 import pytorch_lightning as pl
 
 import config as cfg
-from bat.data import load_split, make_loaders
+from bat.data import load_paper_trainval, make_loaders
 from bat.data.audio import SPEC_H, SPEC_W
 from bat.lightning_utils import ClassifierModule, SaveBest, final_eval, load_weights, log_dir, make_trainer, resolve_resume
 from vit_bat import BatViTClassifier, load_ssl_encoder
@@ -25,8 +25,11 @@ def main():
     pl.seed_everything(cfg.RANDOM_SEED)
     cfg.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
-    train_df, val_df, label2id, id2label, species = load_split(cfg.FT_METADATA_PATH, cfg.FT_DATA_DIR)
-    train_loader, val_loader = make_loaders(train_df, val_df, mode="supervised", balanced=True)
+    train_df, val_df, label2id, id2label, species = load_paper_trainval()
+    train_loader, val_loader = make_loaders(
+        train_df, val_df, mode="supervised", balanced=True,
+        cache_dir=cfg.NABAT_PAPER_SPEC_CACHE,
+    )
 
     ssl_ok = not args.no_ssl and cfg.LOAD_SSL_PRETRAIN
     enc_lr = cfg.FT_ENCODER_LR_SSL if ssl_ok else cfg.FT_ENCODER_LR_NO_SSL

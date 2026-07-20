@@ -258,12 +258,15 @@ class ClassifierModule(pl.LightningModule):
         x, y = batch
         logits = self.model(x)
         self.log("val_loss", self.loss_fn(logits, y), prog_bar=True, on_epoch=True, batch_size=len(y))
-        self._y.append(y.cpu())
-        self._pred.append(logits.argmax(-1).cpu())
+        # int-списки, не GPU/CPU-тензоры — не держим активации до конца эпохи
+        self._y.extend(y.detach().cpu().tolist())
+        self._pred.extend(logits.argmax(-1).detach().cpu().tolist())
 
     def on_validation_epoch_end(self):
-        y = torch.cat(self._y)
-        pred = torch.cat(self._pred)
+        y = np.asarray(self._y, dtype=np.int64)
+        pred = np.asarray(self._pred, dtype=np.int64)
+        self._y.clear()
+        self._pred.clear()
         self.log("macro_f1", f1_score(y, pred, average="macro", zero_division=0), prog_bar=True, on_epoch=True)
         self.log("acc", accuracy_score(y, pred), prog_bar=True, on_epoch=True)
 
@@ -294,8 +297,9 @@ def final_eval(module, val_loader, species, confusion_path):
     y_true, y_pred = [], []
     device = next(module.parameters()).device
     for x, y in val_loader:
-        x = x.to(device)
-        y_pred.extend(module.model(x).argmax(-1).cpu().tolist())
+        logits = module.model(x.to(device, non_blocking=True))
+        y_pred.extend(logits.argmax(-1).cpu().tolist())
         y_true.extend(y.tolist())
+        del logits
     print(classification_report(y_true, y_pred, target_names=species, zero_division=0))
     save_confusion(np.array(y_true), np.array(y_pred), species, confusion_path)

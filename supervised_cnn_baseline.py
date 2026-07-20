@@ -8,8 +8,8 @@ import pytorch_lightning as pl
 import torch.nn as nn
 
 import config as cfg
+from bat.data import load_paper_trainval, make_loaders
 from bat.data.audio import SPEC_CHANNELS
-from bat.data import load_split, make_loaders
 from bat.lightning_utils import ClassifierModule, SaveBest, final_eval, last_ckpt_path, load_weights, log_dir, make_trainer, resolve_resume
 
 BEST_CKPT = cfg.CHECKPOINT_DIR / "cnn_bat_a0_best.pt"
@@ -57,16 +57,19 @@ def main():
     pl.seed_everything(cfg.RANDOM_SEED)
     cfg.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
-    train_df, val_df, label2id, id2label, species = load_split(cfg.FT_METADATA_PATH, cfg.FT_DATA_DIR)
-    train_loader, val_loader = make_loaders(train_df, val_df, mode="supervised", balanced=True)
+    train_df, val_df, label2id, id2label, species = load_paper_trainval()
+    cache = cfg.NABAT_PAPER_SPEC_CACHE
+    train_loader, val_loader = make_loaders(
+        train_df, val_df, mode="supervised", balanced=True, cache_dir=cache,
+    )
 
     if cfg.USE_SPEC_CACHE:
         from bat.data.spec_cache import cache_stats
-        hits, total = cache_stats(train_df)
+        hits, total = cache_stats(train_df, cache_dir=cache)
         if hits < total:
             print(
-                f"spec cache: {hits}/{total} for speedup: "
-                "uv run python scripts/precompute_specs.py",
+                f"spec cache: {hits}/{total} — дождитесь build --precompute-cache "
+                f"или: uv run python scripts/precompute_specs.py --paper",
                 flush=True,
             )
 

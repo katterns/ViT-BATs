@@ -13,7 +13,7 @@ import torch.optim as optim
 from pytorch_lightning.callbacks import Callback
 
 import config as cfg
-from bat.data import load_spec, load_split, make_loaders
+from bat.data import load_paper_trainval, load_spec, make_loaders
 from bat.data.audio import CLIP_SEC, SPEC_CHANNELS, SPEC_H, SPEC_W
 from bat.lightning_utils import EpochLRScheduler, load_weights, log_dir, make_trainer, resolve_resume
 from vit_bat import EMBED_DIM, PATCH_SIZE, BatViTPatchMAE, unpatchify_2d
@@ -173,16 +173,20 @@ def main():
     cfg.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
     if args.full:
-        meta_path, data_dir = cfg.METADATA_PATH, cfg.DATA_DIR
-        print("SSL data: full cleaned/ (ablation, not fair vs subset baselines)", flush=True)
+        print("SSL --full: legacy cleaned/ через load_split (медленный пересчёт импульсов)", flush=True)
+        from bat.data import load_split
+        train_df, val_df, _, _, _ = load_split(cfg.METADATA_PATH, cfg.DATA_DIR)
+        cache_dir = None
     else:
-        meta_path, data_dir = cfg.SSL_METADATA_PATH, cfg.SSL_DATA_DIR
-        print(f"SSL data: {data_dir.name}/ (same subset + split as supervised)", flush=True)
+        train_df, val_df, _, _, _ = load_paper_trainval()
+        cache_dir = cfg.NABAT_PAPER_SPEC_CACHE
+        print(f"SSL data: nabat_paper_31 pulses ({len(train_df)} train + {len(val_df)} val)", flush=True)
 
-    train_df, val_df, _, _, _ = load_split(meta_path, data_dir)
     print(f"SSL: {len(train_df)} train + {len(val_df)} val pulses", flush=True)
     mode = "dual" if cfg.SEM_CONTRASTIVE_WEIGHT > 0 else "ssl"
-    train_loader, val_loader = make_loaders(train_df, val_df, mode=mode, val_mode="ssl")
+    train_loader, val_loader = make_loaders(
+        train_df, val_df, mode=mode, val_mode="ssl", cache_dir=cache_dir,
+    )
 
     module = SSLModule()
     weights_ckpt, pl_ckpt, completed_epochs = resolve_resume(args.resume, "ssl_pretrain", cfg.BEST_CKPT)
@@ -197,7 +201,7 @@ def main():
     elif pl_ckpt is not None:
         print(f"resume trainer: {pl_ckpt}", flush=True)
 
-    data_tag = "full_cleaned" if args.full else "subset_200"
+    data_tag = "full_cleaned" if args.full else "nabat_paper_31"
     trainer = make_trainer(
         "ssl_pretrain",
         max_epochs=cfg.MAX_EPOCHS,

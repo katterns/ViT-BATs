@@ -1,0 +1,55 @@
+Family,Genus,Species,Common Name,4 Letter Code,6 Letter Code
+Molossidae,Eumops,Eumops floridanus,Florida bonneted bat,EUFL,EUMFLO
+Molossidae,Eumops,Eumops perotis,Greater mastiff bat,EUPE,EUMPER
+Molossidae,Eumops,Eumops underwoodi,Underwood's mastiff bat,EUUN,EUMUND
+Molossidae,Molossus,Molossus molossus,Pallas' mastiff bat,MOMO,MOLMOL
+Molossidae,Tadarida,Tadarida brasiliensis,Brazilian free-tailed bat,TABR,TADBRA
+Mormoopidae,Mormoops,Mormoops megalophylla,Ghost-faced bat,MOME,MORMEG
+Noctilionidae ,Noctilio,Noctilio leporinus,Greater bulldog bat,NOLE,NOCLEP
+Phyllostomidae,Artibeus,Artibeus jamaicensis,Jamaican fruit-eating bat,ARJA,ARTJAM
+Phyllostomidae,Brachyphylla,Brachyphylla cavernarum,Antillean fruit-eating bat,BRCA,BRACAV
+Phyllostomidae,Choeronycteris,Choeronycteris mexicana,Mexican long-tongued bat,CHME,CHOMEX
+Phyllostomidae,Diphylla,Diphylla ecaudata,Hairy-legged vampire bat,DIEC,DIPECA
+Phyllostomidae,Leptonycteris,Leptonycteris nivalis,Greater long-nosed bat,LENI,LEPNIV
+Phyllostomidae,Leptonycteris,Leptonycteris yerbabuenae,Lesser long-nosed bat,LEYE,LEPYER
+Phyllostomidae,Macrotus,Macrotus californicus,California leaf-nosed bat,MACA,MACCAL
+Phyllostomidae,Stenoderma,Stenoderma rufum,Red fruit bat,STRU,STERUF
+Vespertilionidae,Antrozous,Antrozous pallidus,Pallid bat,ANPA,ANTPAL
+Vespertilionidae,Corynorhinus,Corynorhinus rafinesquii,Rafinesque's big-eared bat,CORA,CORRAF
+Vespertilionidae,Corynorhinus,Corynorhinus townsendii,Townsend's big-eared bat,COTO,CORTO
+Vespertilionidae,Corynorhinus,townsendii virginianus,Virginia big-eared bat,n/a,COTOVI
+Vespertilionidae,Eptesicus,Eptesicus fuscus,Big brown bat,EPFU,EPTFUS
+Vespertilionidae,Euderma,Euderma maculatum,Spotted bat,EUMA,EUDMAC
+Vespertilionidae,Idionycteris,Idionycteris phyllotis,Allen's big-eared bat,IDPH,IDIPHY
+Vespertilionidae,Lasionycteris,Lasionycteris noctivagans,Silver-haired bat,LANO,LASNOC
+Vespertilionidae,Lasiurus,Lasiurus blossevillii,Western red bat,LABL,LASBLO
+Vespertilionidae,Lasiurus,Lasiurus borealis,Eastern red bat,LABO,LASBOR
+Vespertilionidae,Lasiurus,Lasiurus cinereus,Hoary bat,LACI,LASCIN
+Vespertilionidae,Lasiurus,Lasiurus ega,Southern yellow bat,LAEG,LASEGA
+Vespertilionidae,Lasiurus,Lasiurus intermedius,Northern yellow bat,LAIN,LASINT
+Vespertilionidae,Lasiurus,Lasiurus minor,Minor red bat,LAMI,LASMIN
+Vespertilionidae,Lasiurus,Lasiurus seminolus,Seminole bat,LASE,LASSEM
+Vespertilionidae,Lasiurus,Lasiurus xanthinus,Western yellow bat,LAXA,LASXAN
+Vespertilionidae,Myotis,Myotis auriculus,Southwestern myotis,MYAR,MYOAUR
+Vespertilionidae,Myotis,Myotis austroriparius,Southeastern myotis,MYAU,MYOAUS
+Vespertilionidae,Myotis,Myotis californicus,California bat,MYCA,MYOCAL
+Vespertilionidae,Myotis,Myotis ciliolabrum,Western small-footed myotis,MYCI,MYOCIL
+Vespertilionidae,Myotis,Myotis evotis,Western long-eared bat,MYEV,MYOEVO
+Vespertilionidae,Myotis,Myotis grisescens,Gray bat,MYGR,MYOGRI
+Vespertilionidae,Myotis,Myotis keenii,Keen's bat,MYKE,MYOKEE
+Vespertilionidae,Myotis,Myotis leibii,Eastern small-footed bat,MYLE,MYOLEI
+Vespertilionidae,Myotis,Myotis lucifugus,Little brown bat,MYLU,MYOLUC
+Vespertilionidae,Myotis,Myotis occultus,Arizona myotis,MYOC,MYOOCC
+Vespertilionidae,Myotis,Myotis septentrionalis,Northern long-eared bat,MYSE,MYOSEP
+Vespertilionidae,Myotis,Myotis sodalis,Indiana bat,MYSO,MYOSOD
+Vespertilionidae,Myotis,Myotis thysanodes,Fringed bat,MYTH,MYOTHY
+Vespertilionidae,Myotis,Myotis velifer,Cave bat,MYVE,MYOVEL
+Vespertilionidae,Myotis,Myotis volans,Long-legged bat,MYVO,MYOVOL
+Vespertilionidae,Myotis,Myotis yumanensis,Yuma bat,MYYU,MYOYUM
+Vespertilionidae,Nycticeius,Nycticeius humeralis,Evening bat,NYHU,NYCHUM
+Vespertilionidae,Nyctinomops,Nyctinomops femorosaccus,Pocketed free-tailed bat,NYFE,NYCFEM
+Vespertilionidae,Nyctinomops,Nyctinomops macrotis,Big free-tailed bat,NYMA,NYCMAC
+Vespertilionidae,Parastrellus,Parastrellus hesperus,Canyon bat,PAHE,PARHES
+Vespertilionidae,Perimyotis,Perimyotis subflavus,Tricolored bat,PESU,PERSUB
+n/a,n/a,Not a bat,Not a bat,NOISE,NOTBAT
+n/a,n/a,n/a,Bat but no grouping or user-defined category applies,NoID,NoID
