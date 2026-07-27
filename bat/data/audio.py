@@ -19,7 +19,6 @@ SPEC_GAIN_JITTER_DB = 6.0
 
 
 def read_wav(path):
-    """192 kHz mono — только для log-STFT pipeline, не для NABat v2."""
     y, sr = sf.read(str(path), always_2d=False)
     if y.ndim > 1:
         y = y.mean(axis=1)
@@ -32,7 +31,6 @@ def read_wav(path):
 
 
 def find_pulses(path):
-    """Импульсы = прошедшие окна gottbat process_file; ключ — offset (конец окна, ms)."""
     data = process_file(path)
     if data is None:
         return []
@@ -61,8 +59,7 @@ def get_or_build_base_spec(path, window_offset, *, cache_dir=None):
     return spec, False
 
 
-def precompute_specs(df, desc="specs", *, cache_dir=None):
-    """Кэш по файлам: один process_file на wav, не на каждый импульс."""
+def precompute_specs(df, desc="specs", *, cache_dir=None):  
     from bat.data.nabat import make_spectrogram_chw, metadata_for_offset, process_file
     from bat.data.spec_cache import load_base_spec, save_base_spec
 
@@ -119,7 +116,13 @@ def load_spec(path, training, rng, spec_aug=False, pulse_center=None, cache_dir=
         raise ValueError("pulse_center (gottbat window offset, ms) is required")
 
     if cfg.USE_SPEC_CACHE:
-        base, _ = get_or_build_base_spec(path, int(pulse_center), cache_dir=cache_dir)
+        base = load_base_spec(path, int(pulse_center), cache_dir=cache_dir)
+        if base is None:
+            cache_hint = cache_dir or cfg.NABAT_PAPER_SPEC_CACHE
+            raise FileNotFoundError(
+                f"spec cache miss: {path} pulse_center={pulse_center}. "
+                f"Run: uv run python scripts/precompute_specs.py  (cache_dir={cache_hint})"
+            )
         x = torch.from_numpy(base.copy())
         if training and spec_aug:
             x = _apply_spec_aug(x, rng)
@@ -133,7 +136,6 @@ def load_spec(path, training, rng, spec_aug=False, pulse_center=None, cache_dir=
 
 
 def split_spec_overlap(spec):
-    """Левая и правая части одной spec с перекрытием по времени."""
     _, _, w = spec.shape
     view_w = max(1, int(w * cfg.CONTRASTIVE_VIEW_FRAC))
 
@@ -144,3 +146,53 @@ def split_spec_overlap(spec):
     left = F.interpolate(left.unsqueeze(0), size=size, mode="bilinear", align_corners=False).squeeze(0)
     right = F.interpolate(right.unsqueeze(0), size=size, mode="bilinear", align_corners=False).squeeze(0)
     return left, right
+
+
+def mix_specs(s1, s2, gain_ratio=1.0):
+    if not torch.is_tensor(gain_ratio):
+        gain_ratio = torch.as_tensor(gain_ratio, device=s1.device, dtype=s1.dtype)
+    while gain_ratio.ndim < s1.ndim:
+        gain_ratio = gain_ratio.unsqueeze(-1)
+    return torch.maximum((gain_ratio * s1).clamp(0.0, 1.0), s2)
+
+
+def temporal_jigsaw(x, n_parts=4, *, disallow_identity=True):
+    single = x.dim() == 3
+    if single:
+        x = x.unsqueeze(0)
+    b, c, h, w = x.shape
+    if w % n_parts != 0:
+        raise ValueError(f"width {w} not divisible by jigsaw parts {n_parts}")
+    part_w = w // n_parts
+    parts = x.reshape(b, c, h, n_parts, part_w)
+    perms = []
+    eye = torch.arange(n_parts, device=x.device)
+    for _ in range(b):
+        perm = torch.randperm(n_parts, device=x.device)
+        if disallow_identity and n_parts > 1:
+            while torch.equal(perm, eye):
+                perm = torch.randperm(n_parts, device=x.device)
+        perms.append(perm)
+    perm = torch.stack(perms, dim=0)
+    idx = perm[:, None, None, :, None].expand(b, c, h, n_parts, part_w)
+    shuffled = torch.gather(parts, 3, idx).reshape(b, c, h, w)
+    if single:
+        return shuffled.squeeze(0), perm.squeeze(0)
+    return shuffled, perm
+
+
+def undo_temporal_jigsaw(shuffled, perm):
+    single = shuffled.dim() == 3
+    if single:
+        shuffled = shuffled.unsqueeze(0)
+        perm = perm.unsqueeze(0)
+    b, c, h, w = shuffled.shape
+    n_parts = perm.shape[-1]
+    part_w = w // n_parts
+    parts = shuffled.reshape(b, c, h, n_parts, part_w)
+    inv = torch.argsort(perm, dim=-1)
+    idx = inv[:, None, None, :, None].expand(b, c, h, n_parts, part_w)
+    restored = torch.gather(parts, 3, idx).reshape(b, c, h, w)
+    if single:
+        return restored.squeeze(0)
+    return restored

@@ -45,3 +45,43 @@ def cache_stats(df, *, cache_dir: Path | None = None):
         for r in df.itertuples()
     )
     return hits, len(df)
+
+
+def iter_required_paths(df, *, cache_dir: Path | None = None):
+    for r in df.itertuples():
+        wav = Path(r.path)
+        if not wav.is_file():
+            continue
+        yield spec_cache_path(r.path, int(r.pulse_center), cache_dir=cache_dir)
+
+
+def prune_spec_cache(df, *, cache_dir: Path | None = None) -> int:
+    root = _resolve_cache_dir(cache_dir)
+    if not root.is_dir():
+        return 0
+    keep = set(iter_required_paths(df, cache_dir=cache_dir))
+    removed = 0
+    for npy in root.glob("*.npy"):
+        if npy not in keep:
+            npy.unlink(missing_ok=True)
+            removed += 1
+    return removed
+
+
+def sync_spec_cache(df, *, cache_dir: Path | None = None, desc: str = "specs") -> dict:
+    from bat.data.audio import precompute_specs
+
+    root = _resolve_cache_dir(cache_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    removed = prune_spec_cache(df, cache_dir=cache_dir)
+    built = precompute_specs(df, desc=desc, cache_dir=cache_dir)
+    hits, total = cache_stats(df, cache_dir=cache_dir)
+    if hits < total:
+        raise RuntimeError(f"spec cache incomplete after sync: {hits}/{total} in {root}")
+    return {
+        "removed": removed,
+        "built": built,
+        "cached": hits,
+        "total": total,
+        "dir": str(root),
+    }

@@ -1,30 +1,25 @@
 import argparse
 import math
 import warnings
-from pathlib import Path
 
 warnings.filterwarnings("ignore")
 
-import matplotlib.pyplot as plt
-import numpy as np
 import pytorch_lightning as pl
 import torch
 import torch.optim as optim
 from pytorch_lightning.callbacks import Callback
 
 import config as cfg
-from bat.data import load_paper_trainval, load_spec, make_loaders
-from bat.data.audio import CLIP_SEC, SPEC_CHANNELS, SPEC_H, SPEC_W
+from bat.data import load_paper_trainval, make_loaders
+from bat.data.audio import CLIP_SEC, SPEC_CHANNELS, SPEC_H, SPEC_W, mix_specs
 from bat.lightning_utils import EpochLRScheduler, load_weights, log_dir, make_trainer, resolve_resume
-from vit_bat import EMBED_DIM, PATCH_SIZE, BatViTPatchMAE, unpatchify_2d
+from vit_bat import BatViTPatchMAE, EMBED_DIM, PATCH_SIZE
 
 NOISE_PATCH_PERCENTILE = 25.0
 CONTRASTIVE_TEMP = 0.07
-CONTRASTIVE_EVERY = 4
 WEIGHT_DECAY = 0.05
 ADAMW_BETAS = (0.9, 0.95)
 MIN_LR = 1e-6
-RECON_DEMO_PNG = cfg.CHECKPOINT_DIR / "vit_lfpe_ssl_recon_demo.png"
 
 
 def parse_args():
@@ -80,6 +75,9 @@ class SaveBestSSL(Callback):
                 "patch_size": PATCH_SIZE,
                 "embed_dim": EMBED_DIM,
                 "sem_contrastive_weight": cfg.SEM_CONTRASTIVE_WEIGHT,
+                "sem_sep_weight": cfg.SEM_SEP_WEIGHT,
+                "sem_jigsaw_weight": cfg.SEM_JIGSAW_WEIGHT,
+                "jigsaw_parts": cfg.JIGSAW_PARTS,
                 "preprocess": "nabat_v2",
                 "data": self.data_tag,
             },
@@ -93,7 +91,39 @@ class SSLModule(pl.LightningModule):
         super().__init__()
         self.model = BatViTPatchMAE(SPEC_H, SPEC_W)
 
-    def _loss(self, x, left, right, batch_idx):
+    def _sample_gain_ratio(self, batch_size, device, dtype):
+        lo, hi = cfg.SEP_GAIN_RATIO_MIN, cfg.SEP_GAIN_RATIO_MAX
+        return torch.empty(batch_size, device=device, dtype=dtype).uniform_(lo, hi)
+
+    def _sep_pair(self, x):
+        b = x.shape[0]
+        if b < 2:
+            return None
+        perm = torch.randperm(b, device=x.device)
+        for _ in range(16):
+            if not (perm == torch.arange(b, device=x.device)).any():
+                break
+            perm = torch.randperm(b, device=x.device)
+        else:
+            perm = (torch.arange(b, device=x.device) + 1) % b
+        s1, s2 = x, x[perm]
+        gain = self._sample_gain_ratio(b, x.device, x.dtype)
+        mix = mix_specs(s1, s2, gain)
+        return mix, s1, s2
+
+    def _unpack_batch(self, batch):
+        if isinstance(batch, (list, tuple)):
+            if len(batch) == 2:
+                return batch[0], batch[1], None
+            if len(batch) == 3:
+                return batch[0], batch[1], batch[2]
+        return batch, None, None
+
+    @staticmethod
+    def _due(batch_idx, every, offset=0):
+        return every > 0 and (batch_idx % every) == (offset % every)
+
+    def _loss(self, x, peer, batch_idx):
         loss, _, _, _, sem = self.model(
             x,
             mask_ratio=cfg.MASK_RATIO,
@@ -103,29 +133,48 @@ class SSLModule(pl.LightningModule):
         con = 0.0
         if (
             cfg.SEM_CONTRASTIVE_WEIGHT > 0
-            and batch_idx % CONTRASTIVE_EVERY == 0
-            and left is not None
+            and self._due(batch_idx, cfg.CONTRASTIVE_EVERY, cfg.CONTRASTIVE_EVERY_OFFSET)
+            and peer is not None
         ):
-            c = self.model.contrastive_loss(left, right, CONTRASTIVE_TEMP)
-            loss = loss + cfg.SEM_CONTRASTIVE_WEIGHT * c
-            con = float(c.detach())
-        return loss, sem, con
+            real = (x - peer).abs().flatten(1).max(dim=1).values > 1e-5
+            if int(real.sum()) >= 2:
+                c = self.model.contrastive_loss(x[real], peer[real], CONTRASTIVE_TEMP)
+                loss = loss + cfg.SEM_CONTRASTIVE_WEIGHT * c
+                con = float(c.detach())
+
+        sep = 0.0
+        if cfg.SEM_SEP_WEIGHT > 0 and self._due(batch_idx, cfg.SEP_EVERY, cfg.SEP_EVERY_OFFSET):
+            pair = self._sep_pair(x)
+            if pair is not None:
+                mix, s1, s2 = pair
+                s = self.model.separation_loss(mix, s1, s2)
+                loss = loss + cfg.SEM_SEP_WEIGHT * s
+                sep = float(s.detach())
+
+        jig = 0.0
+        if cfg.SEM_JIGSAW_WEIGHT > 0 and self._due(batch_idx, cfg.JIGSAW_EVERY, cfg.JIGSAW_EVERY_OFFSET):
+            j = self.model.jigsaw_loss(x, n_parts=cfg.JIGSAW_PARTS)
+            loss = loss + cfg.SEM_JIGSAW_WEIGHT * j
+            jig = float(j.detach())
+
+        return loss, sem, con, sep, jig
 
     def training_step(self, batch, batch_idx):
-        if isinstance(batch, (list, tuple)) and len(batch) == 3:
-            x, left, right = batch
-        else:
-            x, left, right = batch, None, None
-        loss, sem, con = self._loss(x, left, right, batch_idx)
+        x, peer, _ = self._unpack_batch(batch)
+        loss, sem, con, sep, jig = self._loss(x, peer, batch_idx)
         self.log("train_loss", loss, prog_bar=True, on_epoch=True)
         self.log("train_recon", sem.get("recon", 0.0), on_epoch=True)
         self.log("train_utterance", sem.get("utterance", 0.0), on_epoch=True)
         if con:
             self.log("train_contrastive", con, on_epoch=True)
+        if sep:
+            self.log("train_sep", sep, on_epoch=True)
+        if jig:
+            self.log("train_jigsaw", jig, on_epoch=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        x = batch[0] if isinstance(batch, (list, tuple)) else batch
+        x, _, _ = self._unpack_batch(batch)
         loss, _, _, _, _ = self.model(
             x, mask_ratio=cfg.MASK_RATIO, noise_percentile=NOISE_PATCH_PERCENTILE, utterance_weight=0.0
         )
@@ -135,43 +184,13 @@ class SSLModule(pl.LightningModule):
         return optim.AdamW(self.parameters(), lr=cfg.BASE_LR, weight_decay=WEIGHT_DECAY, betas=ADAMW_BETAS)
 
 
-@torch.no_grad()
-def save_recon_demo(model, val_df, device, out_path):
-    model.eval()
-    rng = np.random.default_rng(cfg.RANDOM_SEED)
-    row = val_df.iloc[int(rng.integers(len(val_df)))]
-    x = load_spec(row["path"], False, rng, pulse_center=row["pulse_center"]).unsqueeze(0).to(device)
-    _, pred, mask, targets, _ = model(
-        x, mask_ratio=cfg.MASK_RATIO, noise_percentile=NOISE_PATCH_PERCENTILE, utterance_weight=0.0
-    )
-    pf, pt = PATCH_SIZE
-    gf, gt = model.grid_shape
-    pred_p = pred.view(1, gf, gt, SPEC_CHANNELS, pf, pt)
-    tgt_p = targets.view(1, gf, gt, SPEC_CHANNELS, pf, pt)
-    m = mask.view(1, gf, gt).bool()
-    recon_p = tgt_p.clone()
-    recon_p[m] = pred_p[m]
-    fig, axes = plt.subplots(1, 2, figsize=(10, 3.5))
-    axes[0].imshow(x[0].permute(1, 2, 0).cpu().clamp(0, 1), origin="lower", aspect="auto")
-    axes[0].set_title("target")
-    axes[0].axis("off")
-    recon = unpatchify_2d(recon_p, PATCH_SIZE, SPEC_CHANNELS)[0]
-    axes[1].imshow(recon.permute(1, 2, 0).cpu().clamp(0, 1), origin="lower", aspect="auto")
-    axes[1].set_title("reconstruction")
-    axes[1].axis("off")
-    fig.suptitle(f"{row['species']}/{row['filename']}", fontsize=10)
-    fig.tight_layout()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-
-
 def main():
     args = parse_args()
 
     pl.seed_everything(cfg.RANDOM_SEED)
     cfg.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
+    cache = cfg.NABAT_PAPER_SPEC_CACHE
     if args.full:
         print("SSL --full: legacy cleaned/ через load_split (медленный пересчёт импульсов)", flush=True)
         from bat.data import load_split
@@ -179,11 +198,16 @@ def main():
         cache_dir = None
     else:
         train_df, val_df, _, _, _ = load_paper_trainval()
-        cache_dir = cfg.NABAT_PAPER_SPEC_CACHE
+        cache_dir = cache
         print(f"SSL data: nabat_paper_31 pulses ({len(train_df)} train + {len(val_df)} val)", flush=True)
 
+    if cfg.USE_SPEC_CACHE and cache_dir is not None:
+        from bat.data.spec_cache import cache_stats
+        hits, total = cache_stats(train_df, cache_dir=cache_dir)
+        print(f"spec cache: {hits}/{total} in {cache_dir}", flush=True)
+
     print(f"SSL: {len(train_df)} train + {len(val_df)} val pulses", flush=True)
-    mode = "dual" if cfg.SEM_CONTRASTIVE_WEIGHT > 0 else "ssl"
+    mode = "recording" if cfg.SEM_CONTRASTIVE_WEIGHT > 0 else "ssl"
     train_loader, val_loader = make_loaders(
         train_df, val_df, mode=mode, val_mode="ssl", cache_dir=cache_dir,
     )
@@ -192,7 +216,7 @@ def main():
     weights_ckpt, pl_ckpt, completed_epochs = resolve_resume(args.resume, "ssl_pretrain", cfg.BEST_CKPT)
     initial_best = float("inf")
     if weights_ckpt is not None:
-        meta = load_weights(module.model, weights_ckpt)
+        meta = load_weights(module.model, weights_ckpt, strict=False)
         initial_best = float(meta.get("val_recon_loss", float("inf")))
         print(
             f"resume weights: {weights_ckpt} (epoch={meta.get('epoch', '?')}, next epoch={completed_epochs})",
@@ -213,11 +237,14 @@ def main():
         restore_completed_epochs=completed_epochs if pl_ckpt is None else 0,
     )
     print(f"logs: {log_dir('ssl_pretrain')}")
+    print(
+        f"SSL losses: MAE+utt×{cfg.SEM_UTTERANCE_WEIGHT}"
+        f" + same-rec con×{cfg.SEM_CONTRASTIVE_WEIGHT}/every {cfg.CONTRASTIVE_EVERY}+{cfg.CONTRASTIVE_EVERY_OFFSET}"
+        f" + sep×{cfg.SEM_SEP_WEIGHT}/every {cfg.SEP_EVERY}+{cfg.SEP_EVERY_OFFSET}"
+        f" + jigsaw×{cfg.SEM_JIGSAW_WEIGHT}/every {cfg.JIGSAW_EVERY}+{cfg.JIGSAW_EVERY_OFFSET} (parts={cfg.JIGSAW_PARTS})",
+        flush=True,
+    )
     trainer.fit(module, train_loader, val_loader, ckpt_path=str(pl_ckpt) if pl_ckpt else None)
-
-    if cfg.BEST_CKPT.is_file():
-        load_weights(module.model, cfg.BEST_CKPT)
-    save_recon_demo(module.model, val_df, next(module.parameters()).device, RECON_DEMO_PNG)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from bat.data.audio import SPEC_CHANNELS
+from bat.data.audio import SPEC_CHANNELS, temporal_jigsaw
 
 PATCH_SIZE = (10, 10)
 EMBED_DIM = 384
@@ -295,6 +295,8 @@ class BatViTPatchMAE(nn.Module):
         self.decoder_blocks = nn.ModuleList([TransformerBlock(dec_dim, n_heads, drop_path=0.0) for _ in range(dec_depth)])
         self.decoder_norm = nn.LayerNorm(dec_dim)
         self.pred = nn.Linear(dec_dim, self.patch_dim)
+        self.sep_pred1 = nn.Linear(dec_dim, self.patch_dim)
+        self.sep_pred2 = nn.Linear(dec_dim, self.patch_dim)
 
     def _decode(self, latent, ids_restore, pad_mask, batch_size, device):
         dec = self.decoder_embed(latent)
@@ -310,6 +312,15 @@ class BatViTPatchMAE(nn.Module):
         for blk in self.decoder_blocks:
             dec_full = blk(dec_full)
         return self.decoder_norm(dec_full)
+
+    def _decode_full(self, patch_latent):
+        b, device = patch_latent.shape[0], patch_latent.device
+        dec = self.decoder_embed(patch_latent)
+        pe = self.decoder_pos(make_grid(self.grid_shape, device)).unsqueeze(0).expand(b, -1, -1)
+        dec = dec + pe
+        for blk in self.decoder_blocks:
+            dec = blk(dec)
+        return self.decoder_norm(dec)
 
     def forward(self, x, mask_ratio=0.75, noise_percentile=25.0, utterance_weight=0.0):
         targets = patchify(x, self.patch_size)
@@ -340,16 +351,54 @@ class BatViTPatchMAE(nn.Module):
         z1, z2 = tokens[:, 0].chunk(2)
         return nt_xent_loss(z1, z2, temperature)
 
+    def jigsaw_loss(self, x, n_parts=4):
+        shuffled, _ = temporal_jigsaw(x, n_parts=n_parts)
+        encoded = self.encoder.forward_full(shuffled)
+        dec = self._decode_full(encoded[:, 1:])
+        pred = self.pred(dec)
+        target = patchify(x, self.patch_size)
+        return ((pred - target) ** 2).mean()
+
+    def separation_loss(self, mix, s1, s2):
+        encoded = self.encoder.forward_full(mix)
+        dec = self._decode_full(encoded[:, 1:])
+        p1 = self.sep_pred1(dec)
+        p2 = self.sep_pred2(dec)
+        t1 = patchify(s1, self.patch_size)
+        t2 = patchify(s2, self.patch_size)
+        loss_a = ((p1 - t1) ** 2).mean() + ((p2 - t2) ** 2).mean()
+        loss_b = ((p1 - t2) ** 2).mean() + ((p2 - t1) ** 2).mean()
+        return torch.minimum(loss_a, loss_b)
+
+    def separate(self, mix):
+        encoded = self.encoder.forward_full(mix)
+        dec = self._decode_full(encoded[:, 1:])
+        p1 = self.sep_pred1(dec)
+        p2 = self.sep_pred2(dec)
+        return unpatchify_2d(p1, self.patch_size), unpatchify_2d(p2, self.patch_size)
+
     def encoder_state_dict(self):
         return self.encoder.encoder_state_dict()
 
 
 class BatViTClassifier(nn.Module):
-    def __init__(self, n_classes, spec_h, spec_w, embed_dim=EMBED_DIM, depth=ENC_DEPTH, n_heads=N_HEADS, patch_size=PATCH_SIZE):
+    def __init__(
+        self,
+        n_classes,
+        spec_h,
+        spec_w,
+        embed_dim=EMBED_DIM,
+        depth=ENC_DEPTH,
+        n_heads=N_HEADS,
+        patch_size=PATCH_SIZE,
+        dropout=0.2,
+    ):
         super().__init__()
         self.encoder = BatViTEncoder(spec_h, spec_w, embed_dim, depth, n_heads, patch_size)
         self.pool_score = nn.Sequential(nn.LayerNorm(embed_dim), nn.Linear(embed_dim, 1))
-        self.head = nn.Sequential(nn.LayerNorm(embed_dim * 2), nn.Dropout(0.2), nn.Linear(embed_dim * 2, n_classes))
+        self.head = nn.Sequential(
+            nn.LayerNorm(embed_dim * 2), nn.Dropout(dropout), nn.Linear(embed_dim * 2, n_classes)
+        )
 
     def forward(self, x):
         patch_tokens = self.encoder.forward_full(x)[:, 1:]
@@ -361,16 +410,19 @@ class BatViTClassifier(nn.Module):
     def encoder_parameters(self):
         return self.encoder.parameters()
 
+    def head_parameters(self):
+        return list(self.pool_score.parameters()) + list(self.head.parameters())
+
 
 def load_ssl_encoder(classifier, ckpt_path, device, spec_hw, patch_size=PATCH_SIZE, embed_dim=EMBED_DIM):
     path = Path(ckpt_path) if not isinstance(ckpt_path, Path) else ckpt_path
     if not path.is_file():
-        raise FileNotFoundError(f"Нет SSL чекпоинта: {path}. Запустите vit_lfpe_ssl_pretrain.py")
+        raise FileNotFoundError(f"No SSL checkpoint: {path}. Run vit_lfpe_ssl_pretrain.py")
 
     ckpt = torch.load(path, map_location=device, weights_only=False)
     ckpt_cfg = ckpt.get("config", {})
     if ckpt_cfg.get("preprocess") not in (None, "nabat_v2"):
-        raise ValueError(f"SSL ckpt preprocess={ckpt_cfg.get('preprocess')!r}, need nabat_v2")
+        raise ValueError(f"SSL checkpoint preprocess={ckpt_cfg.get('preprocess')!r}, need nabat_v2")
     if ckpt_cfg.get("spec_channels") not in (None, SPEC_CHANNELS):
         raise ValueError(f"SSL ckpt spec_channels={ckpt_cfg.get('spec_channels')}, need {SPEC_CHANNELS}")
     expected = {"spec_hw": spec_hw, "patch_size": patch_size, "embed_dim": embed_dim}
@@ -379,14 +431,14 @@ def load_ssl_encoder(classifier, ckpt_path, device, spec_hw, patch_size=PATCH_SI
         if isinstance(actual, list):
             actual = tuple(actual)
         if actual is not None and actual != val:
-            raise ValueError(f"SSL ckpt {key}: {actual} != {val}")
+            raise ValueError(f"SSL checkpoint {key}: {actual} != {val}")
 
     enc = ckpt.get("encoder_state")
     if not enc:
-        raise KeyError("No encoder_state in checkpoint")
+        raise KeyError("No encoder_state in SSL checkpoint")
     classifier.encoder.load_state_dict(enc, strict=True)
     print(
-        f"loaded SSL encoder: {path} (epoch={ckpt.get('epoch', '?')}, "
+        f"loaded SSL checkpoint: {path} (epoch={ckpt.get('epoch', '?')}, "
         f"val_recon_loss={ckpt.get('val_recon_loss', float('nan')):.4f})",
         flush=True,
     )

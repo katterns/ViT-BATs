@@ -2,18 +2,21 @@ import argparse
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import config as cfg
-from bat.data.audio import precompute_specs
 from bat.data.paper_splits import load_paper_test, load_paper_trainval
-from bat.data.spec_cache import cache_stats
+from bat.data.spec_cache import cache_stats, sync_spec_cache
 
 
 def main():
-    p = argparse.ArgumentParser(description="Precompute float16 spec_cache for nabat_paper_31")
+    p = argparse.ArgumentParser(
+        description="Sync spec_cache to nabat_paper_31 pulses_*.csv (prune + build)",
+    )
     p.add_argument("--limit", type=int, default=0, help="только первые N примеров (0 = все)")
     args = p.parse_args()
 
@@ -24,20 +27,23 @@ def main():
         val_df = val_df.head(args.limit)
         test_df = test_df.head(args.limit)
 
+    trainval_df = pd.concat([train_df, val_df], ignore_index=True)
     trainval_cache = cfg.NABAT_PAPER_SPEC_CACHE
     test_cache = cfg.NABAT_PAPER_TEST_SPEC_CACHE
+
     print(
-        f"precompute paper: train={len(train_df)} val={len(val_df)} test={len(test_df)}",
+        f"sync cache: trainval={len(trainval_df)} (train={len(train_df)} val={len(val_df)}) "
+        f"test={len(test_df)}",
         flush=True,
     )
-    built_train = precompute_specs(train_df, desc="train specs", cache_dir=trainval_cache)
-    built_val = precompute_specs(val_df, desc="val specs", cache_dir=trainval_cache)
-    built_test = precompute_specs(test_df, desc="test specs", cache_dir=test_cache)
+    trainval_stats = sync_spec_cache(trainval_df, cache_dir=trainval_cache, desc="trainval")
+    test_stats = sync_spec_cache(test_df, cache_dir=test_cache, desc="test")
+
     th, tt = cache_stats(train_df, cache_dir=trainval_cache)
     vh, vt = cache_stats(val_df, cache_dir=trainval_cache)
     xeh, xet = cache_stats(test_df, cache_dir=test_cache)
     print(
-        f"done: built train={built_train}, val={built_val}, test={built_test}; "
+        f"done: trainval removed={trainval_stats['removed']} built={trainval_stats['built']}; "
         f"cached train={th}/{tt}, val={vh}/{vt}, test={xeh}/{xet}",
         flush=True,
     )

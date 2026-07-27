@@ -34,14 +34,18 @@ def main():
     ssl_ok = not args.no_ssl and cfg.LOAD_SSL_PRETRAIN
     enc_lr = cfg.FT_ENCODER_LR_SSL if ssl_ok else cfg.FT_ENCODER_LR_NO_SSL
     head_lr = cfg.FT_HEAD_LR
-    model = BatViTClassifier(len(species), SPEC_H, SPEC_W)
+    model = BatViTClassifier(len(species), SPEC_H, SPEC_W, dropout=cfg.FT_DROPOUT)
     module = ClassifierModule(
         model,
         [
             {"params": model.encoder_parameters(), "lr": enc_lr},
-            {"params": model.head.parameters(), "lr": head_lr},
+            {"params": model.head_parameters(), "lr": head_lr},
         ],
-        weight_decay=1e-4, plateau_patience=6, lr_factor=0.5, lr_min=1e-7, label_smoothing=0.1,
+        weight_decay=cfg.FT_WEIGHT_DECAY,
+        plateau_patience=cfg.FT_PLATEAU_PATIENCE,
+        lr_factor=0.5,
+        lr_min=1e-7,
+        label_smoothing=cfg.FT_LABEL_SMOOTHING,
         mixup_alpha=cfg.FT_MIXUP_ALPHA,
     )
 
@@ -67,7 +71,15 @@ def main():
     elif pl_ckpt is not None:
         print(f"resume trainer: {pl_ckpt}", flush=True)
 
-    extra = {"ssl_pretrain_loaded": ssl_ok, "encoder_lr": enc_lr, "head_lr": head_lr, "mixup_alpha": cfg.FT_MIXUP_ALPHA}
+    extra = {
+        "ssl_pretrain_loaded": ssl_ok,
+        "encoder_lr": enc_lr,
+        "head_lr": head_lr,
+        "mixup_alpha": cfg.FT_MIXUP_ALPHA,
+        "weight_decay": cfg.FT_WEIGHT_DECAY,
+        "spec_aug": cfg.SUPERVISED_SPEC_AUG,
+        "dropout": cfg.FT_DROPOUT,
+    }
     trainer = make_trainer(
         "finetune", max_epochs=cfg.FT_MAX_EPOCHS, monitor="macro_f1", mode="max", patience=cfg.FT_PATIENCE,
         extra_callbacks=[SaveBest(cfg.FT_BEST_CKPT, "vit_lfpe_bat", label2id, id2label, extra=extra, initial_best_f1=initial_best)],
@@ -75,6 +87,11 @@ def main():
         restore_completed_epochs=completed_epochs if pl_ckpt is None else 0,
     )
     print(f"logs: {log_dir('finetune')}")
+    print(
+        f"FT: enc_lr={enc_lr:g} head_lr={head_lr:g} wd={cfg.FT_WEIGHT_DECAY} "
+        f"mixup={cfg.FT_MIXUP_ALPHA} dropout={cfg.FT_DROPOUT} spec_aug={cfg.SUPERVISED_SPEC_AUG}",
+        flush=True,
+    )
     trainer.fit(module, train_loader, val_loader, ckpt_path=str(pl_ckpt) if pl_ckpt else None)
 
     if cfg.FT_BEST_CKPT.is_file():

@@ -1,27 +1,3 @@
-"""Сборка датасета, максимально близкого к Khalighifar et al. (2022).
-
-Классы: без CORA/EUFL/LAXA/NYFE. Сколько видов есть на диске — столько и в корпусе
-(сейчас часто 28; после докачки EUMA/NYMA/EUPE → до 31).
-
-Структура:
-  data/nabat_paper_31/
-    trainval/  files_*.csv, pulses_*.csv, spec_cache/
-    test/      files_test.csv, pulses_test.csv, spec_cache/
-    summary.json
-
-Split: 80/10/10 на уровне файлов → pulse expansion (gottbat).
-
-Обновление после докачки:
-  uv run python scripts/build_nabat_paper_dataset.py \\
-    --wav-dir ./data --scan-extracted --no-extract --update --precompute-cache
-
-Первая сборка:
-  uv run python scripts/build_nabat_paper_dataset.py \\
-    --wav-dir ./data --scan-extracted --no-extract --precompute-cache
-"""
-
-from __future__ import annotations
-
 import argparse
 import json
 import re
@@ -44,9 +20,9 @@ from build_cleaned import (  # noqa: E402
     scan_raw,
     write_manifest,
 )
-from bat.data.audio import precompute_specs  # noqa: E402
+from bat.data.balance import balance_pulses_per_species, cap_files_per_species, files_from_pulses  # noqa: E402
 from bat.data.nabat import process_file  # noqa: E402
-from bat.data.spec_cache import cache_stats  # noqa: E402
+from bat.data.spec_cache import sync_spec_cache  # noqa: E402
 
 PAPER_TRAIN_RATIO = 0.80
 PAPER_VAL_RATIO = 0.10
@@ -362,9 +338,117 @@ def build_pulse_manifest_from_zip(files_df: pd.DataFrame, raw_dir: Path) -> pd.D
     return pd.DataFrame(rows, columns=PULSE_COLUMNS[:-1])
 
 
-def build_label_map(train_pulses: pd.DataFrame) -> dict[str, int]:
-    species = sorted(train_pulses["species"].unique())
-    return {name: i for i, name in enumerate(species)}
+def load_manifests(trainval_dir: Path, test_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    files_df = pd.concat([
+        pd.read_csv(trainval_dir / "files_train.csv"),
+        pd.read_csv(trainval_dir / "files_val.csv"),
+        pd.read_csv(test_dir / "files_test.csv"),
+    ], ignore_index=True)
+    pulses_df = pd.concat([
+        pd.read_csv(trainval_dir / "pulses_train.csv"),
+        pd.read_csv(trainval_dir / "pulses_val.csv"),
+        pd.read_csv(test_dir / "pulses_test.csv"),
+    ], ignore_index=True)
+    if "label" in pulses_df.columns:
+        pulses_df = pulses_df.drop(columns=["label"])
+    return files_df, pulses_df
+
+
+def write_split_manifests(
+    files_df: pd.DataFrame,
+    pulses_df: pd.DataFrame,
+    *,
+    trainval_dir: Path,
+    test_dir: Path,
+) -> None:
+    for split_name, path in (
+        ("train", trainval_dir / "files_train.csv"),
+        ("val", trainval_dir / "files_val.csv"),
+        ("test", test_dir / "files_test.csv"),
+    ):
+        write_manifest(files_df[files_df["split"] == split_name][FILE_COLUMNS], path)
+    for split_name, path in (
+        ("train", trainval_dir / "pulses_train.csv"),
+        ("val", trainval_dir / "pulses_val.csv"),
+        ("test", test_dir / "pulses_test.csv"),
+    ):
+        write_manifest(pulses_df[pulses_df["split"] == split_name], path)
+
+
+def sync_all_spec_caches(
+    pulses_df: pd.DataFrame,
+    *,
+    trainval_dir: Path,
+    test_dir: Path,
+) -> dict:
+    trainval_cache = trainval_dir / "spec_cache"
+    test_cache = test_dir / "spec_cache"
+    trainval_pulses = pulses_df[pulses_df["split"].isin(["train", "val"])]
+    # train и val делят один spec_cache — sync только по объединённому манифесту,
+    # иначе prune val удалит все .npy train (и наоборот).
+    trainval_stats = sync_spec_cache(trainval_pulses, cache_dir=trainval_cache, desc="trainval")
+    test_stats = sync_spec_cache(
+        pulses_df[pulses_df["split"] == "test"],
+        cache_dir=test_cache,
+        desc="test",
+    )
+    return {
+        "trainval": trainval_stats,
+        "train": {**trainval_stats, "note": "shared trainval cache dir"},
+        "val": {**trainval_stats, "note": "shared trainval cache dir"},
+        "test": test_stats,
+    }
+
+
+def build_label_map(pulses_df: pd.DataFrame) -> dict[str, int]:
+    train_sp = sorted(pulses_df[pulses_df["split"] == "train"]["species"].unique())
+    rest = sorted(set(pulses_df["species"].unique()) - set(train_sp))
+    return {name: i for i, name in enumerate(train_sp + rest)}
+
+
+def finalize_dataset(
+    files_df: pd.DataFrame,
+    pulses_df: pd.DataFrame,
+    *,
+    trainval_dir: Path,
+    test_dir: Path,
+    summary_path: Path,
+    balance_meta: dict | None,
+    file_cap: int | None,
+    sync_cache: bool,
+) -> None:
+    label2id = build_label_map(pulses_df)
+    pulses_df = _attach_labels(pulses_df, label2id)
+    pulses_df = pulses_df.sort_values(
+        ["split", "species", "filename", "pulse_center"],
+    ).reset_index(drop=True)
+
+    write_split_manifests(files_df, pulses_df, trainval_dir=trainval_dir, test_dir=test_dir)
+
+    summary = print_summary(
+        files_df,
+        pulses_df,
+        balance_meta=balance_meta,
+        file_cap=file_cap,
+    )
+    summary["label2id"] = label2id
+    import config as cfg
+    summary["cache"] = {
+        "version": cfg.SPEC_CACHE_VERSION,
+        "dtype": getattr(cfg, "SPEC_CACHE_DTYPE", "float16"),
+        "approx_bytes_per_pulse": 3 * 100 * 100 * 2,
+    }
+
+    if sync_cache:
+        print("sync spec_cache (prune + build)...", flush=True)
+        summary["spec_cache"] = sync_all_spec_caches(
+            pulses_df,
+            trainval_dir=trainval_dir,
+            test_dir=test_dir,
+        )
+
+    summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"\nsaved trainval={trainval_dir}\n      test={test_dir}\n      {summary_path}", flush=True)
 
 
 def load_existing_pulses(trainval_dir: Path, test_dir: Path) -> pd.DataFrame | None:
@@ -378,15 +462,13 @@ def load_existing_pulses(trainval_dir: Path, test_dir: Path) -> pd.DataFrame | N
     return pd.concat([pd.read_csv(p) for p in paths], ignore_index=True)
 
 
-def precompute_split_cache(pulses_df: pd.DataFrame, cache_dir: Path, name: str) -> dict:
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    print(f"precompute {name} → {cache_dir}", flush=True)
-    built = precompute_specs(pulses_df, desc=f"{name} specs", cache_dir=cache_dir)
-    hits, total = cache_stats(pulses_df, cache_dir=cache_dir)
-    return {"built": built, "cached": hits, "total": total, "dir": str(cache_dir)}
-
-
-def print_summary(files_df: pd.DataFrame, pulses_df: pd.DataFrame) -> dict:
+def print_summary(
+    files_df: pd.DataFrame,
+    pulses_df: pd.DataFrame,
+    *,
+    balance_meta: dict | None = None,
+    file_cap: int | None = None,
+) -> dict:
     summary = {
         "paper_reference": {
             "files": PAPER_FILES_TARGET,
@@ -417,6 +499,10 @@ def print_summary(files_df: pd.DataFrame, pulses_df: pd.DataFrame) -> dict:
             "pulses_per_species": pulses_df.groupby("species").size().to_dict(),
         },
     }
+    if file_cap:
+        summary["file_cap"] = {"cap_per_species_per_split": file_cap}
+    if balance_meta and balance_meta.get("enabled"):
+        summary["pulse_balance"] = balance_meta
     print("\n=== NABat paper-style dataset summary ===", flush=True)
     print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
     return summary
@@ -448,7 +534,41 @@ def main() -> None:
         action="store_true",
         help="spec_cache (float16) в trainval/ и test/",
     )
+    p.add_argument(
+        "--file-cap",
+        type=int,
+        default=0,
+        help="стратифицированный лимит файлов на вид в каждом split (0 = без лимита)",
+    )
+    p.add_argument(
+        "--pulse-cap",
+        type=int,
+        default=0,
+        help="лимит импульсов на вид в каждом split (0 = без лимита)",
+    )
+    p.add_argument(
+        "--balance-pulses",
+        action="store_true",
+        help="равное число импульсов на вид в каждом split (= min по видам)",
+    )
+    p.add_argument(
+        "--rebalance-only",
+        action="store_true",
+        help="готовые CSV → balance → перезапись CSV + sync spec_cache (prune лишнего)",
+    )
     args = p.parse_args()
+
+    if args.balance_pulses and args.pulse_cap > 0:
+        p.error("use either --balance-pulses or --pulse-cap, not both")
+    if args.rebalance_only and not (args.balance_pulses or args.pulse_cap > 0):
+        p.error("--rebalance-only requires --balance-pulses or --pulse-cap")
+
+    need_cache_sync = (
+        args.precompute_cache
+        or args.balance_pulses
+        or args.pulse_cap > 0
+        or args.rebalance_only
+    )
 
     trainval_dir = args.out / "trainval"
     test_dir = args.out / "test"
@@ -462,6 +582,36 @@ def main() -> None:
     pulses_val_path = trainval_dir / "pulses_val.csv"
     pulses_test_path = test_dir / "pulses_test.csv"
     summary_path = args.out / "summary.json"
+
+    if args.rebalance_only:
+        files_df, pulses_df = load_manifests(trainval_dir, test_dir)
+        pulses_df, balance_meta = balance_pulses_per_species(
+            pulses_df,
+            cap=args.pulse_cap if args.pulse_cap > 0 else None,
+            equal=args.balance_pulses,
+            seed=args.seed,
+        )
+        files_df = files_from_pulses(pulses_df, files_df)
+        per_split = pulses_df.groupby(["split", "species"]).size()
+        print(
+            f"rebalance: {balance_meta['n_before']} → {balance_meta['n_after']} pulses; "
+            f"per split×species {int(per_split.min())}–{int(per_split.max())}",
+            flush=True,
+        )
+        finalize_dataset(
+            files_df,
+            pulses_df,
+            trainval_dir=trainval_dir,
+            test_dir=test_dir,
+            summary_path=summary_path,
+            balance_meta=balance_meta,
+            file_cap=args.file_cap if args.file_cap > 0 else None,
+            sync_cache=True,
+        )
+        partial = args.out / "pulses_partial.csv"
+        if partial.is_file():
+            partial.unlink()
+        return
 
     if args.pulses_only:
         files_df = pd.concat([
@@ -490,6 +640,16 @@ def main() -> None:
             if args.update:
                 print("update: no previous files_*.csv — full split", flush=True)
             files_df = assign_file_splits(files_df, args.seed)
+
+        if args.file_cap > 0:
+            before = len(files_df)
+            files_df = cap_files_per_species(files_df, args.file_cap, seed=args.seed)
+            print(
+                f"file-cap={args.file_cap}: {before} → {len(files_df)} files "
+                f"({files_df.groupby(['split', 'species']).size().min()}–"
+                f"{files_df.groupby(['split', 'species']).size().max()} per split×species)",
+                flush=True,
+            )
 
         for split_name, path in (
             ("train", files_train_path),
@@ -529,52 +689,38 @@ def main() -> None:
         )
 
     train_pulses = pulses_df[pulses_df["split"] == "train"]
-    train_sp = sorted(train_pulses["species"].unique())
-    rest = sorted(set(pulses_df["species"].unique()) - set(train_sp))
-    label2id = {name: i for i, name in enumerate(train_sp + rest)}
+    if len(train_pulses) == 0:
+        raise RuntimeError("no train pulses after manifest build")
 
-    pulses_df = _attach_labels(pulses_df, label2id)
-    pulses_df = pulses_df.sort_values(
-        ["split", "species", "filename", "pulse_center"],
-    ).reset_index(drop=True)
+    balance_meta: dict | None = None
+    if args.balance_pulses or args.pulse_cap > 0:
+        pulses_df, balance_meta = balance_pulses_per_species(
+            pulses_df,
+            cap=args.pulse_cap if args.pulse_cap > 0 else None,
+            equal=args.balance_pulses,
+            seed=args.seed,
+        )
+        files_df = files_from_pulses(pulses_df, files_df)
+        per_split = pulses_df.groupby(["split", "species"]).size()
+        print(
+            f"pulse balance: {balance_meta['n_before']} → {balance_meta['n_after']} pulses; "
+            f"per split×species {int(per_split.min())}–{int(per_split.max())}",
+            flush=True,
+        )
 
-    for split_name, path in (
-        ("train", pulses_train_path),
-        ("val", pulses_val_path),
-        ("test", pulses_test_path),
-    ):
-        write_manifest(pulses_df[pulses_df["split"] == split_name], path)
-
-    summary = print_summary(files_df, pulses_df)
-    summary["label2id"] = label2id
-    import config as cfg
-    summary["cache"] = {
-        "version": cfg.SPEC_CACHE_VERSION,
-        "dtype": getattr(cfg, "SPEC_CACHE_DTYPE", "float16"),
-        "approx_bytes_per_pulse": 3 * 100 * 100 * 2,
-    }
-
-    if args.precompute_cache:
-        summary["spec_cache"] = {
-            "train": precompute_split_cache(
-                pulses_df[pulses_df["split"] == "train"],
-                trainval_dir / "spec_cache",
-                "train",
-            ),
-            "val": precompute_split_cache(
-                pulses_df[pulses_df["split"] == "val"],
-                trainval_dir / "spec_cache",
-                "val",
-            ),
-            "test": precompute_split_cache(
-                pulses_df[pulses_df["split"] == "test"],
-                test_dir / "spec_cache",
-                "test",
-            ),
-        }
-
-    summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"\nsaved trainval={trainval_dir}\n      test={test_dir}\n      {summary_path}", flush=True)
+    finalize_dataset(
+        files_df,
+        pulses_df,
+        trainval_dir=trainval_dir,
+        test_dir=test_dir,
+        summary_path=summary_path,
+        balance_meta=balance_meta,
+        file_cap=args.file_cap if args.file_cap > 0 else None,
+        sync_cache=need_cache_sync,
+    )
+    partial = args.out / "pulses_partial.csv"
+    if partial.is_file() and need_cache_sync:
+        partial.unlink()
 
 
 if __name__ == "__main__":

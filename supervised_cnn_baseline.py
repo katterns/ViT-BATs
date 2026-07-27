@@ -69,7 +69,7 @@ def main():
         if hits < total:
             print(
                 f"spec cache: {hits}/{total} — дождитесь build --precompute-cache "
-                f"или: uv run python scripts/precompute_specs.py --paper",
+                f"или: uv run python scripts/precompute_specs.py",
                 flush=True,
             )
 

@@ -13,12 +13,12 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 import config as cfg
 
 
-def load_weights(model, path, key="model_state"):
+def load_weights(model, path, key="model_state", strict=True):
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     state = ckpt.get(key) or ckpt.get("classifier_state") or ckpt.get("model_state")
     if state is None:
         raise KeyError(f"В чекпоинте {path} нет {key}")
-    model.load_state_dict(state, strict=True)
+    model.load_state_dict(state, strict=strict)
     return ckpt
 
 
@@ -44,7 +44,6 @@ def _completed_epochs_from_pt(path: Path) -> int:
 
 
 def resolve_resume(resume, run_name, best_ckpt):
-    """__auto__ / .ckpt -> полный resume; .pt -> веса + эпоха из meta."""
     if resume is None:
         return None, None, 0
 
@@ -99,6 +98,7 @@ def make_trainer(
     epoch_log=None,
     continuing_run=False,
     restore_completed_epochs=0,
+    gradient_clip_val=1.0,
 ):
     root = log_dir(run_name)
     root.mkdir(parents=True, exist_ok=True)
@@ -108,6 +108,7 @@ def make_trainer(
         callbacks.append(RestoreEpoch(restore_completed_epochs))
     callbacks.append(EpochSummary(epoch_log or root / "epoch_log.txt"))
     callbacks.append(SaveLast(run_name))
+    callbacks.append(TBFlush())
     if patience:
         callbacks.append(EarlyStopping(monitor=monitor, patience=patience, mode=mode))
     return pl.Trainer(
@@ -116,13 +117,22 @@ def make_trainer(
         devices=1,
         logger=[
             CSVLogger(save_dir=root, name="csv", version=log_version),
-            TensorBoardLogger(save_dir=root, name="tb", version=log_version),
+            TensorBoardLogger(save_dir=root, name="tb", version=log_version,
+                              default_hp_metric=False),
         ],
         callbacks=callbacks,
-        gradient_clip_val=1.0,
+        gradient_clip_val=gradient_clip_val,
         default_root_dir=root,
         enable_progress_bar=True,
+        log_every_n_steps=50,
     )
+
+
+class TBFlush(Callback):
+    def on_train_epoch_end(self, trainer, pl_module):
+        for logger in trainer.loggers:
+            if hasattr(logger, "experiment") and hasattr(logger.experiment, "flush"):
+                logger.experiment.flush()
 
 
 class EpochLRScheduler(Callback):
