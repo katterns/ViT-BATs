@@ -9,7 +9,7 @@
 
 ## Предобработка данных и вход модели
 
-Протокол близок к NABat ML v2 ([Khalighifar et al., 2022](https://doi.org/10.1111/1365-2664.14280); реализация — `bat/data/nabat.py`, порт gottbat). Все модели в таблице ниже получают **один и тот же** кэшированный вход из `spec_cache`, кроме официальной NABat ML (та же RGB-спектрограмма, другой SavedModel).
+Протокол близок к NABat ML v2 ([Khalighifar et al., 2022](https://doi.org/10.1111/1365-2664.14280); реализация — `bat/data/nabat.py`, порт gottbat). Все модели в таблице ниже получают **один и тот же** кэшированный вход из `spec_cache`.
 
 ### Детекция импульсов
 
@@ -56,6 +56,10 @@ SSL и fine-tune используют те же RGB-спектрограммы *
 | **Same-recording contrastive** | каждый 4-й batch | два импульса **одного WAV** | NT-Xent (λ=0.25) |
 | **Source separation** | каждый 4-й batch (offset 1) | mix = max(g·s1, s2), g∈[0.7, 1.4] | две sep-головы, PIT (λ=0.5) |
 | **Temporal jigsaw** | каждый 4-й batch (offset 2) | **5 полос** перемешаны по времени | восстановить исходный порядок (λ=0.5) |
+
+![SSL pretrain overview](images/ssl_pretrain_overview.png)
+
+*Рис. — MAE, contrastive pair, separation mix, temporal jigsaw. Supervised/test — исходная RGB без этих трансформаций.*
 
 Supervised/test получают полную RGB-спектрограмму без маскирования и aux-трансформаций.
 
