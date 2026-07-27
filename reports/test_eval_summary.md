@@ -3,8 +3,18 @@
 Дата: 2026-07-27
 Обучение не запускалось — только inference на test split.
 
-**Данные:** 1306 test-файлов → **4560** импульсов, **30** классов
-**Test:** `data/nabat_paper_31/test/pulses_test.csv`
+**Датасет:** `data/nabat_paper_31/` — split **80/10/10** по **файлам**, `stratify=species`, seed=42 (локальный proxy; holdout из статьи недоступен).
+
+| Split | Файлов | Импульсов (после balance) | CSV |
+|-------|--------|---------------------------|-----|
+| **Train** | 10 808 | 40 110 | `trainval/pulses_train.csv` |
+| **Val** | 1 464 | 5 700 | `trainval/pulses_val.csv` |
+| **Test** | 1 306 | 4 560 | `test/pulses_test.csv` |
+| **Итого** | 13 578 | 50 370 | 30 классов |
+
+До pulse-balance было **178 736** импульсов; `--balance-pulses` (min per split) → **50 370** (1337 train / 190 val / 152 test на вид, где хватает данных). На **train** дополнительно `WeightedRandomSampler` (равные классы в batch). **Test eval** — без balance, все импульсы holdout as-is.
+
+**Test (этот отчёт):** 1306 файлов → **4560** импульсов, **30** классов  
 **NABat official:** `third_party/gottbat_full/prediction/tf-models/m-1`
 
 ## Предобработка данных и вход модели
@@ -65,7 +75,10 @@ Supervised/test получают полную RGB-спектрограмму б�
 
 ### Split и оценка
 
-- **Test:** `data/nabat_paper_31/test/pulses_test.csv` — holdout **10 %** файлов (paper-style 80/10/10, stratify по виду).
+- **Train / val / test:** 80/10/10 по файлам, stratify по виду (`scripts/build_nabat_paper_dataset.py`).
+- **Pulse balance:** min импульсов на вид **внутри каждого split** (не между split'ами).
+- **Train:** 10 808 файлов, 40 110 импульсов; **val:** 1 464 / 5 700 (early stopping, выбор чекпоинта).
+- **Test:** 1 306 / 4 560 — holdout, метрики ниже только здесь.
 - **Pulse-level:** каждый импульс = один пример (как validation в NABat ML).
 - **File-level:** mean softmax по импульсам файла → argmax (как test в статье, **без range maps**).
 
