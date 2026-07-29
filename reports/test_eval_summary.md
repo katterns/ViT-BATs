@@ -202,44 +202,39 @@ Supervised/test получают полную RGB-спектрограмму б�
 ## 5. CNN SSL ablation (test)
 
 Дата: 2026-07-29  
-Протокол: тот же test split (1306 файлов, 4560 импульсов). Inference по finetune-чекпоинтам из `checkpoints/ablations_cnn/finetune/`. Baseline **CNN** — supervised `cnn_bat_a0_best.pt` (без SSL).
+Протокол: тот же test split (1306 файлов, 4560 импульсов).
 
-Обучены **7 из 15** пресетов (singles: mae/con/sep/jig; пары: mae+con, mae+sep; full: mae+con+sep+jig). Остальные комбинации — не обучались.
+Обучены **7 из 15** пресетов (singles: mae/con/sep/jig; пары: mae+con, mae+sep; full: mae+con+sep+jig). Остальные комбинации — не обучались. Дополнительно: **CNN+mae+mixup** — finetune `mae` с MixUp (α=0.2, как у ViT)
 
-| Метрика | NABat official | CNN | CNN+mae | CNN+con | CNN+sep | CNN+jig | CNN+mae+con | CNN+mae+sep | CNN+mae+con+sep+jig |
-|---------|---|---|---|---|---|---|---|---|---|
-| Pulse-level accuracy | 73.4% | 76.6% | **78.5%** | 77.9% | 77.7% | 77.6% | 77.3% | 77.6% | 78.1% |
-| Pulse-level weighted precision | 78.1% | 77.2% | **78.7%** | 78.3% | 78.0% | 78.0% | 77.4% | 78.0% | 78.2% |
-| **Pulse-level macro-F1** | 0.700 | 0.767 | **0.784** | 0.778 | 0.776 | 0.776 | 0.771 | 0.776 | 0.779 |
-| **File-level accuracy** | 78.6% | 79.7% | **82.5%** | 81.6% | 82.2% | 81.4% | 81.2% | 81.1% | 81.0% |
-| File-level weighted precision | 81.1% | 81.3% | **83.4%** | 82.9% | 82.7% | 82.3% | 82.4% | 82.2% | 81.5% |
-| File-level macro-F1 | 0.757 | 0.781 | **0.813** | 0.803 | 0.810 | 0.801 | 0.797 | 0.799 | 0.802 |
-| File-level majority vote accuracy | 76.6% | 77.7% | **80.4%** | 80.2% | 80.3% | 79.5% | 79.2% | 78.6% | 78.9% |
-| File-level + conf ≥ 0.57 | 89.5% | 90.1% | 90.9% | **92.0%** | 91.6% | 91.4% | 90.7% | 91.2% | 90.4% |
-| Отброшено как NoID (conf < threshold) | 350 | 388 | 354 | 376 | 380 | 385 | 372 | 378 | 355 |
-| Классов с ≥90% file ID rate | 8 / 30 | 7 / 30 | **10 / 30** | 9 / 30 | **10 / 30** | 9 / 30 | **11 / 30** | 7 / 30 | **10 / 30** |
+| Метрика | NABat official | CNN | CNN+mae | CNN+mae+mixup | CNN+con | CNN+sep | CNN+jig | CNN+mae+con | CNN+mae+sep | CNN+mae+con+sep+jig |
+|---------|---|---|---|---|---|---|---|---|---|---|
+| Pulse-level accuracy | 73.4% | 76.6% | 78.5% | **78.8%** | 77.9% | 77.7% | 77.6% | 77.3% | 77.6% | 78.1% |
+| Pulse-level weighted precision | 78.1% | 77.2% | 78.7% | **79.2%** | 78.3% | 78.0% | 78.0% | 77.4% | 78.0% | 78.2% |
+| **Pulse-level macro-F1** | 0.700 | 0.767 | 0.784 | **0.786** | 0.778 | 0.776 | 0.776 | 0.771 | 0.776 | 0.779 |
+| **File-level accuracy** | 78.6% | 79.7% | **82.5%** | 82.4% | 81.6% | 82.2% | 81.4% | 81.2% | 81.1% | 81.0% |
+| File-level weighted precision | 81.1% | 81.3% | 83.4% | **83.5%** | 82.9% | 82.7% | 82.3% | 82.4% | 82.2% | 81.5% |
+| File-level macro-F1 | 0.757 | 0.781 | **0.813** | **0.813** | 0.803 | 0.810 | 0.801 | 0.797 | 0.799 | 0.802 |
+| File-level majority vote accuracy | 76.6% | 77.7% | **80.4%** | 79.8% | 80.2% | 80.3% | 79.5% | 79.2% | 78.6% | 78.9% |
+| File-level + conf ≥ 0.57 | 89.5% | 90.1% | 90.9% | 91.7% | **92.0%** | 91.6% | 91.4% | 90.7% | 91.2% | 90.4% |
+| Отброшено как NoID (conf < threshold) | 350 | 388 | **354** | 391 | 376 | 380 | 385 | 372 | 378 | 355 |
+| Классов с ≥90% file ID rate | 8 / 30 | 7 / 30 | **10 / 30** | **10 / 30** | 9 / 30 | **10 / 30** | 9 / 30 | **11 / 30** | 7 / 30 | **10 / 30** |
 
 ### Итог абляции (test)
 
 | Вопрос | Ответ |
 |--------|-------|
-| Лучший pulse macro-F1 | **CNN+mae** (0.784, +0.017 vs supervised CNN) |
-| Лучший file accuracy | **CNN+mae** (82.5%, +2.8 pp vs CNN) |
-| Лучший conf ≥ 0.57 | **CNN+con** (92.0%) |
+| Лучший pulse macro-F1 | **CNN+mae+mixup** (0.786, +0.019 vs supervised CNN) |
+| Лучший file accuracy | **CNN+mae** (82.5%, +2.8 pp vs CNN); mixup 82.4% (−0.1 pp) |
+| Лучший conf ≥ 0.57 | **CNN+con** (92.0%); mixup 91.7% — второй среди mae-вариантов |
 | SSL помогает CNN? | Да: все 7 вариантов ≥ CNN по pulse/file F1 |
-| Лучший single-task SSL | **mae** (recon+utterance) |
+| Лучший single-task SSL | **mae** (recon+utterance); MixUp при finetune даёт +0.002 pulse F1 |
 | Full combo (4 задачи) | 0.779 pulse F1 — хуже лучших singles/pairs |
-
-Сырые JSON: `checkpoints/test_eval_ablations.json`  
-Скрипт: `uv run python scripts/eval_test_summary.py --out checkpoints/test_eval_ablations.json`
 
 ---
 
 ## Протокол подсчёта file-level метрик
 
 1. Для каждого WAV: inference на всех импульсах из test split.
-2. **Mean probability:** усреднение softmax-векторов по импульсам → argmax.
-3. **Majority vote:** наиболее частый класс среди импульсов.
-4. **Conf ≥ 0.57:** файлы с max(mean_prob) < threshold исключаются как NoID.
-
-Скрипт: `uv run python scripts/eval_test_summary.py`
+2. **Mean probability (file-level accuracy):** для каждого импульса считаем softmax-вектор вероятностей; по всем импульсам файла усредняем эти векторы поэлементно, затем берём argmax. Учитывается не только метка на каждом импульсе, но и насколько модель была уверена.
+3. **Majority vote (file-level majority vote accuracy):** на каждом импульсе сначала argmax (жёсткий класс), затем по файлу выбирается **наиболее частый** класс среди импульсов (mode).
+4. **Conf ≥ 0.57:** считается только для агрегации **mean probability** — файлы, у которых max усреднённого softmax < 0.57, исключаются как NoID (неидентифицированные); accuracy пересчитывается на оставшихся.

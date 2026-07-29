@@ -61,20 +61,25 @@ def ssl_ckpt_path(preset):
     return SSL_CKPT_DIR / f"{preset.id}_best.pt"
 
 
-def ft_ckpt_path(preset):
-    return FT_CKPT_DIR / f"{preset.id}_best.pt"
+def _ft_stem(preset, tag=""):
+    stem = preset.id
+    return f"{stem}_{tag}" if tag else stem
+
+
+def ft_ckpt_path(preset, tag=""):
+    return FT_CKPT_DIR / f"{_ft_stem(preset, tag)}_best.pt"
 
 
 def ssl_run_name(preset):
     return f"ablations_cnn/ssl_{preset.id}"
 
 
-def ft_run_name(preset):
-    return f"ablations_cnn/ft_{preset.id}"
+def ft_run_name(preset, tag=""):
+    return f"ablations_cnn/ft_{_ft_stem(preset, tag)}"
 
 
-def confusion_path(preset):
-    return ABLATION_ROOT / "confusion" / f"{preset.id}_confusion_matrix.png"
+def confusion_path(preset, tag=""):
+    return ABLATION_ROOT / "confusion" / f"{_ft_stem(preset, tag)}_confusion_matrix.png"
 
 
 def ssl_monitor(preset):

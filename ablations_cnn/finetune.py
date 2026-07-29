@@ -30,11 +30,17 @@ def main():
         "--resume", nargs="?", const="__auto__", default=None,
         help="без пути: last.ckpt; .ckpt — полный resume; .pt — только веса",
     )
+    p.add_argument(
+        "--mixup", action="store_true",
+        help=f"MixUp при train (α={cfg.FT_MIXUP_ALPHA}, как ViT finetune)",
+    )
     args = p.parse_args()
 
     tasks = parse_preset(args.preset)
-    best_ckpt = ft_ckpt_path(tasks)
-    run_name = ft_run_name(tasks)
+    tag = "mixup" if args.mixup else ""
+    mixup_alpha = cfg.FT_MIXUP_ALPHA if args.mixup else 0.0
+    best_ckpt = ft_ckpt_path(tasks, tag)
+    run_name = ft_run_name(tasks, tag)
     ssl_path = args.ssl_ckpt or ssl_ckpt_path(tasks)
 
     pl.seed_everything(cfg.RANDOM_SEED)
@@ -53,7 +59,7 @@ def main():
     module = ClassifierModule(
         model, [{"params": model.parameters(), "lr": LR}],
         weight_decay=WD, plateau_patience=PLATEAU_PATIENCE, lr_factor=LR_FACTOR, lr_min=LR_MIN,
-        label_smoothing=LS,
+        label_smoothing=LS, mixup_alpha=mixup_alpha,
     )
 
     weights_ckpt, pl_ckpt, completed_epochs = resolve_resume(args.resume, run_name, best_ckpt)
@@ -74,20 +80,21 @@ def main():
         extra_callbacks=[
             SaveBest(
                 best_ckpt, f"cnn_ssl_{tasks.id.replace('+', '_')}",
-                label2id, id2label, extra={"preset": tasks.id, "ssl_ckpt": str(ssl_path)},
+                label2id, id2label,
+                extra={"preset": tasks.id, "ssl_ckpt": str(ssl_path), "mixup_alpha": mixup_alpha},
                 initial_best_f1=initial_best,
             )
         ],
         continuing_run=args.resume is not None,
         restore_completed_epochs=completed_epochs if pl_ckpt is None else 0,
     )
-    print(f"preset: {tasks.id}", flush=True)
+    print(f"preset: {tasks.id}  mixup_alpha={mixup_alpha}", flush=True)
     print(f"logs: {log_dir(run_name)}", flush=True)
     trainer.fit(module, train_loader, val_loader, ckpt_path=str(pl_ckpt) if pl_ckpt else None)
 
     if best_ckpt.is_file():
         load_weights(model, best_ckpt)
-    final_eval(module, val_loader, species, confusion_path(tasks))
+    final_eval(module, val_loader, species, confusion_path(tasks, tag))
 
 
 if __name__ == "__main__":

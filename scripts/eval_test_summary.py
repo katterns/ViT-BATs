@@ -136,12 +136,16 @@ def eval_checkpoint(name, ckpt_path, test_df, cache_dir, device, *, supervised=F
     }
 
 
-def discover_ablation_checkpoints():
+def discover_ablation_checkpoints(*, include_mixup=False):
     found = []
     for preset in ALL_PRESETS:
         path = FT_CKPT_DIR / f"{preset.id}_best.pt"
         if path.is_file():
             found.append((f"CNN+{preset.id}", path))
+        if include_mixup:
+            mix_path = FT_CKPT_DIR / f"{preset.id}_mixup_best.pt"
+            if mix_path.is_file():
+                found.append((f"CNN+{preset.id}+mixup", mix_path))
     return found
 
 
@@ -150,6 +154,8 @@ def main():
     p.add_argument("--out", type=Path, default=cfg.CHECKPOINT_DIR / "test_eval_results.json")
     p.add_argument("--skip-cnn", action="store_true")
     p.add_argument("--preset", default=None, help="single ablation preset id")
+    p.add_argument("--mixup", action="store_true", help="eval *_mixup_best.pt вместо обычного")
+    p.add_argument("--include-mixup", action="store_true", help="в discover добавить *_mixup_best.pt")
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -163,12 +169,15 @@ def main():
         if cnn_ckpt.is_file():
             models.append(("CNN", cnn_ckpt, True))
     if args.preset:
-        path = FT_CKPT_DIR / f"{parse_preset(args.preset).id}_best.pt"
+        pid = parse_preset(args.preset).id
+        suffix = "_mixup" if args.mixup else ""
+        path = FT_CKPT_DIR / f"{pid}{suffix}_best.pt"
         if not path.is_file():
             raise FileNotFoundError(path)
-        models.append((f"CNN+{args.preset}", path, False))
+        name = f"CNN+{args.preset}+mixup" if args.mixup else f"CNN+{args.preset}"
+        models.append((name, path, False))
     else:
-        for name, path in discover_ablation_checkpoints():
+        for name, path in discover_ablation_checkpoints(include_mixup=args.include_mixup):
             models.append((name, path, False))
 
     if not models:

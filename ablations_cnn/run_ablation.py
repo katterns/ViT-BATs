@@ -13,8 +13,10 @@ import torch
 from ablations_cnn.presets import ALL_PRESETS, REPORT_PATH, ft_ckpt_path, parse_preset, ssl_ckpt_path
 
 
-def _run(script, preset):
+def _run(script, preset, *, mixup=False):
     cmd = [sys.executable, str(ROOT / "ablations_cnn" / script), "--preset", preset.id]
+    if mixup and script == "finetune.py":
+        cmd.append("--mixup")
     print(f"\n>>> {' '.join(cmd)}\n", flush=True)
     subprocess.run(cmd, cwd=ROOT, check=True)
 
@@ -48,6 +50,7 @@ def main():
     p.add_argument("--list", action="store_true")
     p.add_argument("--collect", action="store_true")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--mixup", action="store_true", help="MixUp при finetune (отдельные *_mixup_best.pt)")
     args = p.parse_args()
 
     if args.list:
@@ -67,7 +70,8 @@ def main():
             if args.stage in ("pretrain", "all"):
                 print(f"pretrain  --preset {preset.id}")
             if args.stage in ("finetune", "all"):
-                print(f"finetune  --preset {preset.id}")
+                suffix = " --mixup" if args.mixup else ""
+                print(f"finetune  --preset {preset.id}{suffix}")
         return
 
     cfg.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
@@ -77,7 +81,7 @@ def main():
         if args.stage in ("finetune", "all"):
             if args.stage == "finetune" and not ssl_ckpt_path(preset).is_file():
                 raise FileNotFoundError(f"SSL checkpoint missing: {ssl_ckpt_path(preset)}")
-            _run("finetune.py", preset)
+            _run("finetune.py", preset, mixup=args.mixup)
 
     if args.stage in ("finetune", "all"):
         write_report(collect_results())
