@@ -86,6 +86,13 @@ Supervised/test получают полную RGB-спектрограмму б�
 
 ## 1. Общие метрики
 
+**Confidence и порог (как в NABat ML, Khalighifar et al., 2022).** После mean softmax по импульсам файла получаем вектор средних вероятностей `mean_prob`; **confidence** = `max(mean_prob)` — уверенность в топ-классе. В промышленном pipeline NABat ML file-level identification — не всегда «угадать класс любой ценой»:
+
+1. **Condition 1 (range maps)** — предсказание отфильтровывают по **географическим картам ареалов**: вид не может быть назначен, если он не встречается в ячейке/сезоне записи. **Здесь range maps не применялись.**
+2. **Condition 2 (confidence threshold)** — если `max(mean_prob) < 0.57`, файл помечают **NoID** (no identification): модель «не уверена», вид не присваивают. Порог **0.57** взят из статьи; у нас воспроизведён только этот шаг.
+
+Строки **File-level accuracy / macro-F1 / weighted precision** выше — по **всем** test-файлам с принудительным argmax (даже при низкой уверенности). Строка **File-level + conf ≥ 0.57** — accuracy **только среди файлов с conf ≥ 0.57**; остальные в NoID (см. строку «Отброшено…»). Это ближе к operational metric из статьи, но **без range maps** метрика всё равно не сопоставима с их **92 %** weighted accuracy на полном test (там condition 1 + 2 вместе).
+
 | Метрика | NABat official | CNN | ResNet18 | ConvNeXt-S | ViT + SSL |
 |---------|---|---|---|---|---|
 | Pulse-level accuracy | 73.4% | 76.6% | 76.4% | 70.1% | 72.9% |
@@ -189,6 +196,42 @@ Supervised/test получают полную RGB-спектрограмму б�
 | Лучший pulse macro-F1 | **CNN** (0.767) |
 | Лучший file accuracy | **ResNet18** (80.6%) |
 | Наши модели vs NABat official (file acc) | лучшая `ResNet18` 80.6% vs 78.6% (+2.0%) |
+
+---
+
+## 5. CNN SSL ablation (test)
+
+Дата: 2026-07-29  
+Протокол: тот же test split (1306 файлов, 4560 импульсов). Inference по finetune-чекпоинтам из `checkpoints/ablations_cnn/finetune/`. Baseline **CNN** — supervised `cnn_bat_a0_best.pt` (без SSL).
+
+Обучены **7 из 15** пресетов (singles: mae/con/sep/jig; пары: mae+con, mae+sep; full: mae+con+sep+jig). Остальные комбинации — не обучались.
+
+| Метрика | NABat official | CNN | CNN+mae | CNN+con | CNN+sep | CNN+jig | CNN+mae+con | CNN+mae+sep | CNN+mae+con+sep+jig |
+|---------|---|---|---|---|---|---|---|---|---|
+| Pulse-level accuracy | 73.4% | 76.6% | **78.5%** | 77.9% | 77.7% | 77.6% | 77.3% | 77.6% | 78.1% |
+| Pulse-level weighted precision | 78.1% | 77.2% | **78.7%** | 78.3% | 78.0% | 78.0% | 77.4% | 78.0% | 78.2% |
+| **Pulse-level macro-F1** | 0.700 | 0.767 | **0.784** | 0.778 | 0.776 | 0.776 | 0.771 | 0.776 | 0.779 |
+| **File-level accuracy** | 78.6% | 79.7% | **82.5%** | 81.6% | 82.2% | 81.4% | 81.2% | 81.1% | 81.0% |
+| File-level weighted precision | 81.1% | 81.3% | **83.4%** | 82.9% | 82.7% | 82.3% | 82.4% | 82.2% | 81.5% |
+| File-level macro-F1 | 0.757 | 0.781 | **0.813** | 0.803 | 0.810 | 0.801 | 0.797 | 0.799 | 0.802 |
+| File-level majority vote accuracy | 76.6% | 77.7% | **80.4%** | 80.2% | 80.3% | 79.5% | 79.2% | 78.6% | 78.9% |
+| File-level + conf ≥ 0.57 | 89.5% | 90.1% | 90.9% | **92.0%** | 91.6% | 91.4% | 90.7% | 91.2% | 90.4% |
+| Отброшено как NoID (conf < threshold) | 350 | 388 | 354 | 376 | 380 | 385 | 372 | 378 | 355 |
+| Классов с ≥90% file ID rate | 8 / 30 | 7 / 30 | **10 / 30** | 9 / 30 | **10 / 30** | 9 / 30 | **11 / 30** | 7 / 30 | **10 / 30** |
+
+### Итог абляции (test)
+
+| Вопрос | Ответ |
+|--------|-------|
+| Лучший pulse macro-F1 | **CNN+mae** (0.784, +0.017 vs supervised CNN) |
+| Лучший file accuracy | **CNN+mae** (82.5%, +2.8 pp vs CNN) |
+| Лучший conf ≥ 0.57 | **CNN+con** (92.0%) |
+| SSL помогает CNN? | Да: все 7 вариантов ≥ CNN по pulse/file F1 |
+| Лучший single-task SSL | **mae** (recon+utterance) |
+| Full combo (4 задачи) | 0.779 pulse F1 — хуже лучших singles/pairs |
+
+Сырые JSON: `checkpoints/test_eval_ablations.json`  
+Скрипт: `uv run python scripts/eval_test_summary.py --out checkpoints/test_eval_ablations.json`
 
 ---
 
