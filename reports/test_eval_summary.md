@@ -206,6 +206,8 @@ Supervised/test получают полную RGB-спектрограмму б�
 
 Обучены **7 из 15** пресетов (singles: mae/con/sep/jig; пары: mae+con, mae+sep; full: mae+con+sep+jig). Остальные комбинации — не обучались. Дополнительно: **CNN+mae+mixup** — finetune `mae` с MixUp (α=0.2, как у ViT)
 
+Для SSL предобучения было выбрано 10 эпох для каждой из моделей, для дообучения - 40 (early stop на 8 эпохах без улучшения).
+
 | Метрика | NABat official | CNN | CNN+mae | CNN+mae+mixup | CNN+con | CNN+sep | CNN+jig | CNN+mae+con | CNN+mae+sep | CNN+mae+con+sep+jig |
 |---------|---|---|---|---|---|---|---|---|---|---|
 | Pulse-level accuracy | 73.4% | 76.6% | 78.5% | **78.8%** | 77.9% | 77.7% | 77.6% | 77.3% | 77.6% | 78.1% |
