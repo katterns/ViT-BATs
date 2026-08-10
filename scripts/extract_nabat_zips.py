@@ -1,7 +1,3 @@
-"""Распаковка NABat zip в data/<SPECIES>/; архив удаляется только если все WAV на месте."""
-
-from __future__ import annotations
-
 import argparse
 import shutil
 import sys

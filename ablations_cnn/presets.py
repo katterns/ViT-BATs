@@ -57,29 +57,33 @@ def parse_preset(value):
     raise ValueError(f"unknown preset {value!r}; expected one of: {valid}")
 
 
-def ssl_ckpt_path(preset):
-    return SSL_CKPT_DIR / f"{preset.id}_best.pt"
+def ssl_ckpt_path(preset, ssl_version=1):
+    suffix = "" if int(ssl_version) == 1 else f"_v{int(ssl_version)}"
+    return SSL_CKPT_DIR / f"{preset.id}{suffix}_best.pt"
 
 
-def _ft_stem(preset, tag=""):
+def _ft_stem(preset, tag="", ssl_version=1):
     stem = preset.id
+    if int(ssl_version) != 1:
+        stem = f"{stem}_v{int(ssl_version)}"
     return f"{stem}_{tag}" if tag else stem
 
 
-def ft_ckpt_path(preset, tag=""):
-    return FT_CKPT_DIR / f"{_ft_stem(preset, tag)}_best.pt"
+def ft_ckpt_path(preset, tag="", ssl_version=1):
+    return FT_CKPT_DIR / f"{_ft_stem(preset, tag, ssl_version)}_best.pt"
 
 
-def ssl_run_name(preset):
-    return f"ablations_cnn/ssl_{preset.id}"
+def ssl_run_name(preset, ssl_version=1):
+    suffix = "" if int(ssl_version) == 1 else f"_v{int(ssl_version)}"
+    return f"ablations_cnn/ssl_{preset.id}{suffix}"
 
 
-def ft_run_name(preset, tag=""):
-    return f"ablations_cnn/ft_{_ft_stem(preset, tag)}"
+def ft_run_name(preset, tag="", ssl_version=1):
+    return f"ablations_cnn/ft_{_ft_stem(preset, tag, ssl_version)}"
 
 
-def confusion_path(preset, tag=""):
-    return ABLATION_ROOT / "confusion" / f"{_ft_stem(preset, tag)}_confusion_matrix.png"
+def confusion_path(preset, tag="", ssl_version=1):
+    return ABLATION_ROOT / "confusion" / f"{_ft_stem(preset, tag, ssl_version)}_confusion_matrix.png"
 
 
 def ssl_monitor(preset):

@@ -4,21 +4,34 @@ import torch.utils.data
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 import config as cfg
-from bat.data.audio import load_spec, split_spec_overlap
+from bat.data.audio import load_spec
+from bat.data.waveform_cache import WaveformClipCache
 
 
 class BatDataset(Dataset):
-    def __init__(self, df, training=False, mode="ssl", cache_dir=None):
+    def __init__(
+        self,
+        df,
+        training=False,
+        mode="ssl",
+        cache_dir=None,
+        waveform_cache_dir=None,
+    ):
         self.df = df.reset_index(drop=True)
         self.training = training
         self.mode = mode
         self.cache_dir = cache_dir
         self.rng = np.random.default_rng(cfg.RANDOM_SEED)
         self.path_to_idxs = None
-        if mode == "recording":
+        if mode in ("recording", "recording_waveform"):
             self.path_to_idxs = {}
             for i, path in enumerate(self.df["path"].tolist()):
                 self.path_to_idxs.setdefault(path, []).append(i)
+        self.waveforms = None
+        if mode in ("waveform", "recording_waveform", "waveform_only"):
+            if waveform_cache_dir is None:
+                raise ValueError(f"waveform_cache_dir is required for mode={mode!r}")
+            self.waveforms = WaveformClipCache(self.df, waveform_cache_dir)
 
     def __len__(self):
         return len(self.df)
@@ -34,15 +47,7 @@ class BatDataset(Dataset):
         row = self.df.iloc[idx]
         center = int(row["pulse_center"])
 
-        if self.mode == "dual":
-            full = load_spec(
-                row["path"], self.training, self.rng,
-                pulse_center=center, cache_dir=self.cache_dir,
-            )
-            left, right = split_spec_overlap(full)
-            return full, left, right
-
-        if self.mode == "recording":
+        if self.mode in ("recording", "recording_waveform"):
             x = self._load_row(row)
             peers = [j for j in self.path_to_idxs.get(row["path"], []) if j != idx]
             if peers:
@@ -50,7 +55,25 @@ class BatDataset(Dataset):
                 x2 = self._load_row(self.df.iloc[j])
             else:
                 x2 = x.clone()
+            if self.mode == "recording_waveform":
+                waveform = torch.from_numpy(
+                    self.waveforms.load(row["path"], center).copy()
+                )
+                return x, x2, waveform
             return x, x2
+
+        if self.mode == "waveform":
+            x = self._load_row(row)
+            waveform = torch.from_numpy(
+                self.waveforms.load(row["path"], center).copy()
+            )
+            return x, waveform
+
+        if self.mode == "waveform_only":
+            waveform = torch.from_numpy(
+                self.waveforms.load(row["path"], center).copy()
+            )
+            return (waveform,)
 
         spec_aug = self.training and self.mode == "supervised" and cfg.SUPERVISED_SPEC_AUG
         x = self._load_row(row, spec_aug=spec_aug)
@@ -69,7 +92,13 @@ def _worker_init_fn(worker_id: int) -> None:
 
 
 def make_loaders(
-    train_df, val_df, mode="ssl", balanced=False, val_mode=None, cache_dir=None,
+    train_df,
+    val_df,
+    mode="ssl",
+    balanced=False,
+    val_mode=None,
+    cache_dir=None,
+    waveform_cache_dir=None,
 ):
     val_mode = val_mode or mode
     if cfg.USE_SPEC_CACHE and cache_dir is not None:
@@ -84,8 +113,20 @@ def make_loaders(
                     "Run: uv run python scripts/precompute_specs.py"
                 )
 
-    train_ds = BatDataset(train_df, training=True, mode=mode, cache_dir=cache_dir)
-    val_ds = BatDataset(val_df, training=False, mode=val_mode, cache_dir=cache_dir)
+    train_ds = BatDataset(
+        train_df,
+        training=True,
+        mode=mode,
+        cache_dir=cache_dir,
+        waveform_cache_dir=waveform_cache_dir,
+    )
+    val_ds = BatDataset(
+        val_df,
+        training=False,
+        mode=val_mode,
+        cache_dir=cache_dir,
+        waveform_cache_dir=waveform_cache_dir,
+    )
 
     num_workers = cfg.NUM_WORKERS
     loader_kw: dict = {

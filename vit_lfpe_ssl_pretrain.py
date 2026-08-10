@@ -26,11 +26,6 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--resume", nargs="?", const="__auto__", default=None,
                    help="без пути: last.ckpt; .ckpt — полный resume; .pt — только веса")
-    p.add_argument(
-        "--full",
-        action="store_true",
-        help="pretrain на full cleaned/ (нечестно vs subset CNN; только ablation)",
-    )
     return p.parse_args()
 
 
@@ -46,7 +41,7 @@ def set_epoch_lr(epoch, optimizer):
 
 
 class SaveBestSSL(Callback):
-    def __init__(self, initial_best=float("inf"), data_tag="subset_200"):
+    def __init__(self, initial_best=float("inf"), data_tag="nabat_paper_31"):
         self.best = float(initial_best)
         self.data_tag = data_tag
 
@@ -191,17 +186,11 @@ def main():
     cfg.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
     cache = cfg.NABAT_PAPER_SPEC_CACHE
-    if args.full:
-        print("SSL --full: legacy cleaned/ через load_split (медленный пересчёт импульсов)", flush=True)
-        from bat.data import load_split
-        train_df, val_df, _, _, _ = load_split(cfg.METADATA_PATH, cfg.DATA_DIR)
-        cache_dir = None
-    else:
-        train_df, val_df, _, _, _ = load_paper_trainval()
-        cache_dir = cache
-        print(f"SSL data: nabat_paper_31 pulses ({len(train_df)} train + {len(val_df)} val)", flush=True)
+    train_df, val_df, _, _, _ = load_paper_trainval()
+    cache_dir = cache
+    print(f"SSL data: nabat_paper_31 pulses ({len(train_df)} train + {len(val_df)} val)", flush=True)
 
-    if cfg.USE_SPEC_CACHE and cache_dir is not None:
+    if cfg.USE_SPEC_CACHE:
         from bat.data.spec_cache import cache_stats
         hits, total = cache_stats(train_df, cache_dir=cache_dir)
         print(f"spec cache: {hits}/{total} in {cache_dir}", flush=True)
@@ -225,7 +214,7 @@ def main():
     elif pl_ckpt is not None:
         print(f"resume trainer: {pl_ckpt}", flush=True)
 
-    data_tag = "full_cleaned" if args.full else "nabat_paper_31"
+    data_tag = "nabat_paper_31"
     trainer = make_trainer(
         "ssl_pretrain",
         max_epochs=cfg.MAX_EPOCHS,

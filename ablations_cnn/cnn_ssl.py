@@ -59,7 +59,7 @@ class BatCNNEncoder(nn.Module):
 
 
 class UNetDecoder(nn.Module):
-    """Upsample from 3×3 bottleneck with skip connections (50→25→12→6→3)."""
+    """v1: upsample from 3×3 bottleneck with skip connections (50→25→12→6→3)."""
 
     def __init__(self):
         super().__init__()
@@ -100,6 +100,41 @@ class UNetDecoder(nn.Module):
         return torch.sigmoid(self.sep_head1(h)), torch.sigmoid(self.sep_head2(h))
 
 
+class BottleneckDecoder(nn.Module):
+    """v2: MAE-style decoder — только bottleneck, без skip-связей."""
+
+    def __init__(self):
+        super().__init__()
+        self.up4 = nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1)
+        self.dec4 = nn.Sequential(nn.Conv2d(128, 128, 3, padding=1, bias=False), _gn(128), nn.ReLU(True))
+        self.up3 = nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1)
+        self.dec3 = nn.Sequential(nn.Conv2d(64, 64, 3, padding=1, bias=False), _gn(64), nn.ReLU(True))
+        self.up2 = nn.ConvTranspose2d(64, 32, 4, stride=2, padding=1)
+        self.dec2 = nn.Sequential(nn.Conv2d(32, 32, 3, padding=1, bias=False), _gn(32), nn.ReLU(True))
+        self.up1 = nn.ConvTranspose2d(32, 32, 4, stride=2, padding=1)
+        self.dec1 = nn.Sequential(nn.Conv2d(32, 32, 3, padding=1, bias=False), _gn(32), nn.ReLU(True))
+        self.up0 = nn.ConvTranspose2d(32, 32, 4, stride=2, padding=1)
+        self.dec0 = nn.Sequential(nn.Conv2d(32, 32, 3, padding=1, bias=False), _gn(32), nn.ReLU(True))
+        self.recon_head = nn.Conv2d(32, SPEC_CHANNELS, kernel_size=1)
+        self.sep_head1 = nn.Conv2d(32, SPEC_CHANNELS, kernel_size=1)
+        self.sep_head2 = nn.Conv2d(32, SPEC_CHANNELS, kernel_size=1)
+
+    def _decode(self, feat, out_size):
+        x = self.dec4(self.up4(feat))
+        x = self.dec3(self.up3(x))
+        x = self.dec2(self.up2(x))
+        x = self.dec1(self.up1(x))
+        x = self.dec0(self.up0(x))
+        return F.interpolate(x, size=out_size, mode="bilinear", align_corners=False)
+
+    def recon(self, feat, out_size):
+        return torch.sigmoid(self.recon_head(self._decode(feat, out_size)))
+
+    def separate(self, feat, out_size):
+        h = self._decode(feat, out_size)
+        return torch.sigmoid(self.sep_head1(h)), torch.sigmoid(self.sep_head2(h))
+
+
 class ProjectionHead(nn.Module):
     def __init__(self, in_dim=ENC_DIM, hidden=256, out_dim=PROJ_DIM):
         super().__init__()
@@ -127,21 +162,32 @@ def patch_mse(pred, target, patch_size=PATCH_SIZE):
 
 
 class BatCNNSSL(nn.Module):
-    def __init__(self, tasks: TaskSet, spec_h=100, spec_w=100):
+    def __init__(self, tasks: TaskSet, spec_h=100, spec_w=100, ssl_version=1):
         super().__init__()
+        if ssl_version not in (1, 2, 3):
+            raise ValueError(f"ssl_version must be 1, 2 or 3, got {ssl_version}")
         self.tasks = tasks
+        self.ssl_version = int(ssl_version)
         self.spec_hw = (spec_h, spec_w)
         self.patch_size = PATCH_SIZE
         self.grid_shape = (spec_h // PATCH_SIZE[0], spec_w // PATCH_SIZE[1])
         self.encoder = BatCNNEncoder()
 
         if tasks.mae or tasks.sep or tasks.jig:
-            self.decoder = UNetDecoder()
+            self.decoder = BottleneckDecoder() if self.ssl_version >= 2 else UNetDecoder()
         if tasks.con:
             self.projection = ProjectionHead()
 
     def encoder_state_dict(self):
         return self.encoder.state_dict()
+
+    def _decode_input(self, x):
+        if self.ssl_version >= 2:
+            return self.encoder.feature_map(x)
+        return self.encoder.forward_stages(x)
+
+    def _bottleneck(self, encoded):
+        return encoded if self.ssl_version >= 2 else encoded[-1]
 
     def _signal_patch_mask(self, x, mask_ratio, noise_percentile):
         targets = patchify(x, self.patch_size)
@@ -153,14 +199,14 @@ class BatCNNSSL(nn.Module):
 
     def mae_loss(self, x, mask_ratio, noise_percentile, utterance_weight):
         mask = self._signal_patch_mask(x, mask_ratio, noise_percentile)
-        stages = self.encoder.forward_stages(apply_patch_mask(x, mask, self.patch_size))
-        pred = self.decoder.recon(stages, self.spec_hw)
+        encoded = self._decode_input(apply_patch_mask(x, mask, self.patch_size))
+        pred = self.decoder.recon(encoded, self.spec_hw)
         per_patch = patch_mse(pred, x, self.patch_size)
         recon = (per_patch * mask).sum() / mask.sum().clamp_min(1.0)
         sem = {"recon": recon.detach()}
         total = recon
         if utterance_weight > 0:
-            feat = stages[-1]
+            feat = self._bottleneck(encoded)
             masked_emb = F.adaptive_avg_pool2d(feat, 1).flatten(1)
             utt = cosine_loss(masked_emb, self.encoder.embed(x).detach())
             sem["utterance"] = utt.detach()
@@ -173,15 +219,15 @@ class BatCNNSSL(nn.Module):
         return nt_xent_loss(z1, z2, temperature)
 
     def separation_loss(self, mix, s1, s2):
-        stages = self.encoder.forward_stages(mix)
-        p1, p2 = self.decoder.separate(stages, self.spec_hw)
+        encoded = self._decode_input(mix)
+        p1, p2 = self.decoder.separate(encoded, self.spec_hw)
         loss_a = F.mse_loss(p1, s1) + F.mse_loss(p2, s2)
         loss_b = F.mse_loss(p1, s2) + F.mse_loss(p2, s1)
         return torch.minimum(loss_a, loss_b)
 
     def jigsaw_loss(self, x, n_parts):
         shuffled, _ = temporal_jigsaw(x, n_parts=n_parts)
-        pred = self.decoder.recon(self.encoder.forward_stages(shuffled), self.spec_hw)
+        pred = self.decoder.recon(self._decode_input(shuffled), self.spec_hw)
         return F.mse_loss(pred, x)
 
 
@@ -196,6 +242,12 @@ class BatCNNClassifier(nn.Module):
 
 
 def load_ssl_encoder(classifier, ckpt_path):
-    ckpt = torch.load(Path(ckpt_path), map_location="cpu", weights_only=False)
-    classifier.encoder.load_state_dict(ckpt["encoder_state"])
+    path = Path(ckpt_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"No SSL checkpoint: {path}")
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    enc = ckpt.get("encoder_state")
+    if not enc:
+        raise KeyError(f"No encoder_state in SSL checkpoint: {path}")
+    classifier.encoder.load_state_dict(enc, strict=True)
     return ckpt

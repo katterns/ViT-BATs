@@ -27,6 +27,10 @@ def main():
     p.add_argument("--preset", required=True)
     p.add_argument("--ssl-ckpt", default=None)
     p.add_argument(
+        "--ssl-version", type=int, choices=(1, 2, 3), default=1,
+        help="должен совпадать с pretrain; влияет на путь ssl/ft ckpt",
+    )
+    p.add_argument(
         "--resume", nargs="?", const="__auto__", default=None,
         help="без пути: last.ckpt; .ckpt — полный resume; .pt — только веса",
     )
@@ -37,11 +41,12 @@ def main():
     args = p.parse_args()
 
     tasks = parse_preset(args.preset)
+    ssl_version = args.ssl_version
     tag = "mixup" if args.mixup else ""
     mixup_alpha = cfg.FT_MIXUP_ALPHA if args.mixup else 0.0
-    best_ckpt = ft_ckpt_path(tasks, tag)
-    run_name = ft_run_name(tasks, tag)
-    ssl_path = args.ssl_ckpt or ssl_ckpt_path(tasks)
+    best_ckpt = ft_ckpt_path(tasks, tag, ssl_version)
+    run_name = ft_run_name(tasks, tag, ssl_version)
+    ssl_path = args.ssl_ckpt or ssl_ckpt_path(tasks, ssl_version)
 
     pl.seed_everything(cfg.RANDOM_SEED)
     ABLATION_ROOT.mkdir(parents=True, exist_ok=True)
@@ -53,9 +58,6 @@ def main():
     )
 
     model = BatCNNClassifier(len(species))
-    load_ssl_encoder(model, ssl_path)
-    print(f"loaded SSL encoder: {ssl_path}", flush=True)
-
     module = ClassifierModule(
         model, [{"params": model.parameters(), "lr": LR}],
         weight_decay=WD, plateau_patience=PLATEAU_PATIENCE, lr_factor=LR_FACTOR, lr_min=LR_MIN,
@@ -64,6 +66,11 @@ def main():
 
     weights_ckpt, pl_ckpt, completed_epochs = resolve_resume(args.resume, run_name, best_ckpt)
     initial_best = -1.0
+    if weights_ckpt is None and pl_ckpt is None:
+        load_ssl_encoder(model, ssl_path)
+        print(f"loaded SSL encoder: {ssl_path}", flush=True)
+    else:
+        print("skip SSL load: resuming finetune checkpoint", flush=True)
     if weights_ckpt is not None:
         meta = load_weights(model, weights_ckpt)
         initial_best = float(meta.get("val_macro_f1", -1.0))
@@ -81,21 +88,25 @@ def main():
             SaveBest(
                 best_ckpt, f"cnn_ssl_{tasks.id.replace('+', '_')}",
                 label2id, id2label,
-                extra={"preset": tasks.id, "ssl_ckpt": str(ssl_path), "mixup_alpha": mixup_alpha},
+                extra={
+                    "preset": tasks.id,
+                    "ssl_ckpt": str(ssl_path),
+                    "ssl_version": ssl_version,
+                    "mixup_alpha": mixup_alpha,
+                },
                 initial_best_f1=initial_best,
             )
         ],
         continuing_run=args.resume is not None,
         restore_completed_epochs=completed_epochs if pl_ckpt is None else 0,
     )
-    print(f"preset: {tasks.id}  mixup_alpha={mixup_alpha}", flush=True)
+    print(f"preset: {tasks.id}  ssl_version={ssl_version}  mixup_alpha={mixup_alpha}", flush=True)
     print(f"logs: {log_dir(run_name)}", flush=True)
     trainer.fit(module, train_loader, val_loader, ckpt_path=str(pl_ckpt) if pl_ckpt else None)
 
     if best_ckpt.is_file():
         load_weights(model, best_ckpt)
-    final_eval(module, val_loader, species, confusion_path(tasks, tag))
-
+    final_eval(module, val_loader, species, confusion_path(tasks, tag, ssl_version))
 
 if __name__ == "__main__":
     main()

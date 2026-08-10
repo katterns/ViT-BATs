@@ -234,6 +234,46 @@ Supervised/test получают полную RGB-спектрограмму б�
 
 ---
 
+## 6. CNN SSL: сравнение версий (test)
+
+Дата: 2026-08-10  
+Протокол: тот же test split (1306 файлов, 4560 импульсов). Inference через `scripts/eval_test_summary.py`; JSON: `checkpoints/test_eval_ssl_versions.json`.
+
+Сравниваются **supervised baseline** и finetune-чекпоинты с разными вариантами SSL pretrain:
+
+| Модель | SSL pretrain | Separation mix |
+|--------|--------------|----------------|
+| **CNN** | — (supervised) | — |
+| **CNN+mae** | v1: UNet decoder | max(g·RGB₁, RGB₂) |
+| **CNN+mae_v2** | v2: bottleneck decoder (MAE) | — |
+| **CNN+sep** | v1: UNet decoder | max(g·RGB₁, RGB₂) |
+| **CNN+sep_v3** | v3: bottleneck + waveform | физическая смесь w₁+w₂ → tensor RGB renderer |
+
+| Метрика | CNN | CNN+mae | CNN+mae_v2 | CNN+sep | CNN+sep_v3 |
+|---------|-----|---------|------------|---------|------------|
+| Pulse-level accuracy | 76.6% | 78.5% | **78.6%** | 77.7% | 77.7% |
+| Pulse-level weighted precision | 77.2% | 78.7% | **78.9%** | 78.0% | 78.0% |
+| **Pulse-level macro-F1** | 0.767 | 0.784 | **0.786** | 0.776 | 0.776 |
+| **File-level accuracy** | 79.7% | **82.5%** | 82.2% | 82.2% | 81.4% |
+| File-level weighted precision | 81.3% | **83.4%** | 82.9% | 82.7% | 82.3% |
+| File-level macro-F1 | 0.781 | **0.813** | 0.811 | 0.810 | 0.798 |
+| File-level majority vote accuracy | 77.7% | **80.4%** | 80.3% | 80.3% | 79.6% |
+| File-level + conf ≥ 0.57 | 90.1% | 90.9% | 91.4% | **91.6%** | 91.2% |
+| Отброшено как NoID (conf < threshold) | 388 | 354 | 391 | 380 | 372 |
+| Классов с ≥90% file ID rate | 7 / 30 | 10 / 30 | **11 / 30** | 10 / 30 | 8 / 30 |
+
+### Итог по версиям (test)
+
+| Вопрос | Ответ |
+|--------|-------|
+| Лучший pulse macro-F1 | **CNN+mae_v2** (0.786, +0.019 vs CNN) |
+| Лучший file accuracy | **CNN+mae** (82.5%) |
+| sep v3 vs sep v1 (pulse F1) | Практически одинаково (0.776 vs 0.776) |
+| sep v3 vs sep v1 (file acc) | v3 хуже (−0.8 pp: 81.4% vs 82.2%) |
+| Физическая смесь (v3) | Не ухудшила pulse F1 относительно v1, но file-level чуть ниже |
+
+---
+
 ## Протокол подсчёта file-level метрик
 
 1. Для каждого WAV: inference на всех импульсах из test split.

@@ -1,5 +1,3 @@
-"""Картинка: RGB-спектрограммы NABat v2 (gottbat) после предобработки."""
-
 import argparse
 import sys
 from pathlib import Path

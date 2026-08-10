@@ -1,5 +1,3 @@
-"""Test inference + метрики (pulse/file level) для CNN и ablations_cnn."""
-
 import argparse
 import json
 import sys
@@ -18,7 +16,7 @@ if str(ROOT) not in sys.path:
 
 import config as cfg
 from ablations_cnn.cnn_ssl import BatCNNClassifier
-from ablations_cnn.presets import ALL_PRESETS, FT_CKPT_DIR, parse_preset
+from ablations_cnn.presets import ALL_PRESETS, ft_ckpt_path, parse_preset
 from bat.data import load_paper_test, load_paper_trainval
 from bat.data.audio import load_spec
 from bat.lightning_utils import load_weights
@@ -47,7 +45,7 @@ def load_supervised_cnn(ckpt_path):
 @torch.no_grad()
 def predict_df(model, df, cache_dir, device):
     model.eval()
-    probs, labels, paths, filenames = [], [], [], []
+    probs, labels, paths = [], [], []
     for start in range(0, len(df), BATCH_SIZE):
         batch = df.iloc[start : start + BATCH_SIZE]
         xs, ys = [], []
@@ -59,8 +57,7 @@ def predict_df(model, df, cache_dir, device):
         probs.append(F.softmax(logits, dim=-1).cpu().numpy())
         labels.extend(ys)
         paths.extend(batch["path"].tolist())
-        filenames.extend(batch["filename"].tolist())
-    return np.vstack(probs), np.array(labels), paths, filenames
+    return np.vstack(probs), np.array(labels), paths
 
 
 def file_metrics(probs, labels, paths, id2label):
@@ -118,7 +115,7 @@ def eval_checkpoint(name, ckpt_path, test_df, cache_dir, device, *, supervised=F
         model, ckpt = load_cnn_classifier(ckpt_path)
     id2label = {int(k): v for k, v in ckpt["id2label"].items()}
 
-    probs, labels, paths, filenames = predict_df(model, test_df, cache_dir, device)
+    probs, labels, paths = predict_df(model, test_df, cache_dir, device)
     pulse_pred = probs.argmax(axis=1)
 
     fm = file_metrics(probs, labels, paths, id2label)
@@ -136,16 +133,18 @@ def eval_checkpoint(name, ckpt_path, test_df, cache_dir, device, *, supervised=F
     }
 
 
-def discover_ablation_checkpoints(*, include_mixup=False):
+def discover_ablation_checkpoints(*, include_mixup=False, ssl_version=1):
     found = []
     for preset in ALL_PRESETS:
-        path = FT_CKPT_DIR / f"{preset.id}_best.pt"
+        path = ft_ckpt_path(preset, ssl_version=ssl_version)
         if path.is_file():
-            found.append((f"CNN+{preset.id}", path))
+            tag = "" if ssl_version == 1 else f"_v{ssl_version}"
+            found.append((f"CNN+{preset.id}{tag}", path))
         if include_mixup:
-            mix_path = FT_CKPT_DIR / f"{preset.id}_mixup_best.pt"
+            mix_path = ft_ckpt_path(preset, tag="mixup", ssl_version=ssl_version)
             if mix_path.is_file():
-                found.append((f"CNN+{preset.id}+mixup", mix_path))
+                tag = "" if ssl_version == 1 else f"_v{ssl_version}"
+                found.append((f"CNN+{preset.id}{tag}+mixup", mix_path))
     return found
 
 
@@ -154,6 +153,10 @@ def main():
     p.add_argument("--out", type=Path, default=cfg.CHECKPOINT_DIR / "test_eval_results.json")
     p.add_argument("--skip-cnn", action="store_true")
     p.add_argument("--preset", default=None, help="single ablation preset id")
+    p.add_argument(
+        "--ssl-version", type=int, choices=(1, 2, 3), default=1,
+        help="versioned CNN SSL checkpoint",
+    )
     p.add_argument("--mixup", action="store_true", help="eval *_mixup_best.pt вместо обычного")
     p.add_argument("--include-mixup", action="store_true", help="в discover добавить *_mixup_best.pt")
     args = p.parse_args()
@@ -169,15 +172,20 @@ def main():
         if cnn_ckpt.is_file():
             models.append(("CNN", cnn_ckpt, True))
     if args.preset:
-        pid = parse_preset(args.preset).id
-        suffix = "_mixup" if args.mixup else ""
-        path = FT_CKPT_DIR / f"{pid}{suffix}_best.pt"
+        preset = parse_preset(args.preset)
+        tag = "mixup" if args.mixup else ""
+        path = ft_ckpt_path(preset, tag=tag, ssl_version=args.ssl_version)
         if not path.is_file():
             raise FileNotFoundError(path)
-        name = f"CNN+{args.preset}+mixup" if args.mixup else f"CNN+{args.preset}"
+        ver = "" if args.ssl_version == 1 else f"_v{args.ssl_version}"
+        name = f"CNN+{preset.id}{ver}"
+        if args.mixup:
+            name += "+mixup"
         models.append((name, path, False))
     else:
-        for name, path in discover_ablation_checkpoints(include_mixup=args.include_mixup):
+        for name, path in discover_ablation_checkpoints(
+            include_mixup=args.include_mixup, ssl_version=args.ssl_version,
+        ):
             models.append((name, path, False))
 
     if not models:

@@ -1,7 +1,7 @@
 import numpy as np
-import soundfile as sf
 import torch
 import torch.nn.functional as F
+from matplotlib import colormaps
 
 import config as cfg
 from bat.data.nabat import CLIP_MS, IMG_CHANNELS, IMG_SIZE, make_spectrogram_chw, metadata_for_offset, process_file
@@ -11,23 +11,14 @@ SPEC_H = IMG_SIZE
 SPEC_W = IMG_SIZE
 SPEC_CHANNELS = IMG_CHANNELS
 CLIP_SEC = CLIP_MS / 1000.0
+WAVEFORM_SAMPLE_RATE = 192_000
+_MAGMA_LUT = torch.from_numpy(
+    colormaps["magma"](np.linspace(0.0, 1.0, 256))[:, :3].astype(np.float32)
+)
 
-WAV_GAIN_JITTER_DB = 3.0
 SPEC_TIME_MASK_MAX = 10
 SPEC_FREQ_MASK_MAX = 10
 SPEC_GAIN_JITTER_DB = 6.0
-
-
-def read_wav(path):
-    y, sr = sf.read(str(path), always_2d=False)
-    if y.ndim > 1:
-        y = y.mean(axis=1)
-    target_sr = 192_000
-    if sr != target_sr:
-        old_t = np.linspace(0, len(y) / sr, len(y), endpoint=False)
-        new_t = np.linspace(0, len(y) / sr, int(len(y) * target_sr / sr), endpoint=False)
-        y = np.interp(new_t, old_t, y)
-    return y.astype(np.float32)
 
 
 def find_pulses(path):
@@ -50,16 +41,7 @@ def compute_base_spec(path, window_offset):
     return img.astype(np.float32)
 
 
-def get_or_build_base_spec(path, window_offset, *, cache_dir=None):
-    cached = load_base_spec(path, window_offset, cache_dir=cache_dir)
-    if cached is not None:
-        return cached, True
-    spec = compute_base_spec(path, window_offset)
-    save_base_spec(path, window_offset, spec, cache_dir=cache_dir)
-    return spec, False
-
-
-def precompute_specs(df, desc="specs", *, cache_dir=None):  
+def precompute_specs(df, desc="specs", *, cache_dir=None):
     from bat.data.nabat import make_spectrogram_chw, metadata_for_offset, process_file
     from bat.data.spec_cache import load_base_spec, save_base_spec
 
@@ -149,11 +131,76 @@ def split_spec_overlap(spec):
 
 
 def mix_specs(s1, s2, gain_ratio=1.0):
+    """v1: occlusion mix — в каждом пикселе берётся max(g·s1, s2)."""
     if not torch.is_tensor(gain_ratio):
         gain_ratio = torch.as_tensor(gain_ratio, device=s1.device, dtype=s1.dtype)
     while gain_ratio.ndim < s1.ndim:
         gain_ratio = gain_ratio.unsqueeze(-1)
     return torch.maximum((gain_ratio * s1).clamp(0.0, 1.0), s2)
+
+
+def waveform_mix_to_rgb(waveforms, sample_rate=WAVEFORM_SAMPLE_RATE):
+    """Render a batch of 50 ms waveform mixtures into NABat-like RGB tensors."""
+    if waveforms.ndim != 2:
+        raise ValueError(f"expected [batch, samples], got {tuple(waveforms.shape)}")
+    if sample_rate != WAVEFORM_SAMPLE_RATE:
+        raise ValueError(f"expected sample_rate={WAVEFORM_SAMPLE_RATE}, got {sample_rate}")
+
+    n_fft = int(0.001 * sample_rate)
+    hop_length = n_fft // 4
+    window = torch.hamming_window(
+        n_fft,
+        periodic=True,
+        device=waveforms.device,
+        dtype=waveforms.dtype,
+    )
+    stft = torch.stft(
+        waveforms,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        win_length=n_fft,
+        window=window,
+        center=True,
+        pad_mode="reflect",
+        return_complex=True,
+    )
+    power = stft.abs().square()
+    db = 10.0 * torch.log10(power.clamp_min(1e-10))
+    db_max = db.amax(dim=(-2, -1), keepdim=True)
+    db = torch.maximum(db, db_max - 80.0)
+
+    freqs = torch.fft.rfftfreq(n_fft, d=1.0 / sample_rate).to(waveforms.device)
+    high = min(100_000.0, sample_rate / 2.0 - 2_000.0)
+    passband = (freqs > 5_000.0) & (freqs < high)
+    db = db.masked_fill(~passband[None, :, None], -500.0)
+
+    denoised = db - db.median(dim=2, keepdim=True).values
+    denoised = denoised - denoised.median(dim=1, keepdim=True).values
+    denoised = denoised.clamp_min(0.0)
+
+    # specshow uses a linear 5–100 kHz axis; at 192 kHz the top 4 kHz are blank.
+    display = denoised[:, freqs > 5_000.0]
+    scale = display.amax(dim=(-2, -1), keepdim=True).clamp_min(1e-6)
+    normalized = display / scale
+    lut = _MAGMA_LUT.to(device=waveforms.device, dtype=waveforms.dtype)
+    position = normalized * (lut.shape[0] - 1)
+    lower = position.floor().long()
+    upper = position.ceil().long()
+    weight = (position - lower).unsqueeze(-1)
+    rgb = lut[lower] * (1.0 - weight) + lut[upper] * weight
+    rgb = rgb.permute(0, 3, 1, 2)
+
+    active_height = round(
+        (sample_rate / 2.0 - 5_000.0) / (100_000.0 - 5_000.0) * SPEC_H
+    )
+    rgb = F.interpolate(
+        rgb,
+        size=(active_height, SPEC_W),
+        mode="bilinear",
+        align_corners=False,
+    )
+    rgb = torch.flip(rgb, dims=(2,))
+    return F.pad(rgb, (0, 0, SPEC_H - active_height, 0), value=0.0)
 
 
 def temporal_jigsaw(x, n_parts=4, *, disallow_identity=True):
@@ -179,20 +226,3 @@ def temporal_jigsaw(x, n_parts=4, *, disallow_identity=True):
     if single:
         return shuffled.squeeze(0), perm.squeeze(0)
     return shuffled, perm
-
-
-def undo_temporal_jigsaw(shuffled, perm):
-    single = shuffled.dim() == 3
-    if single:
-        shuffled = shuffled.unsqueeze(0)
-        perm = perm.unsqueeze(0)
-    b, c, h, w = shuffled.shape
-    n_parts = perm.shape[-1]
-    part_w = w // n_parts
-    parts = shuffled.reshape(b, c, h, n_parts, part_w)
-    inv = torch.argsort(perm, dim=-1)
-    idx = inv[:, None, None, :, None].expand(b, c, h, n_parts, part_w)
-    restored = torch.gather(parts, 3, idx).reshape(b, c, h, w)
-    if single:
-        return restored.squeeze(0)
-    return restored

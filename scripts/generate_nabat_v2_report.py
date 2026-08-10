@@ -1,5 +1,3 @@
-"""Гистограмма результатов из lightning_logs + вход contrastive learning."""
-
 import argparse
 import re
 import sys
@@ -99,7 +97,7 @@ def plot_histogram(results: list[tuple[str, dict, str]], out_path: Path):
         y=0.98,
     )
     ax.set_title(
-        f"subset_200 • val split 15% • seed={cfg.RANDOM_SEED} • metrics from lightning_logs",
+        f"nabat_paper_31 • val split • seed={cfg.RANDOM_SEED} • metrics from lightning_logs",
         fontsize=11,
         color="0.35",
         pad=10,

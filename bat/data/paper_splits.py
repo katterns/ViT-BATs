@@ -1,7 +1,3 @@
-"""Загрузка готовых split'ов NABat paper-style (trainval / test)."""
-
-from __future__ import annotations
-
 from pathlib import Path
 
 import pandas as pd

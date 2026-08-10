@@ -8,7 +8,7 @@ presentation.pdf
 презентация.pdf
 Презентация1.pdf
 .env
-!data/audio_metadata_cleaned.csv
 !NABat_Species_Codes.csv
 .DS_Store
 data/*
+.cache
